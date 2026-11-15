@@ -15,6 +15,7 @@ targets:
     sources:
       - path: ios/plat_ios.m
       - path: ios/gpu_metal.m
+      - path: ios/port_save_sync.m                  # saves shared between devices (ios-ports README section 4)
     info:
       path: Support/Info.plist
       properties:

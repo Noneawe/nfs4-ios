@@ -27,6 +27,7 @@
 #include <sys/ucontext.h>
 #include "plat.h"
 #include "rt_host.h"
+#import "port_save_sync.h"
 
 void hle_key_event(uint8_t sc, int down);
 id<MTLTexture> gpu_metal_display_texture(uint64_t *serial);
@@ -120,21 +121,66 @@ static void install_crash_handlers(void) {
     NSSetUncaughtExceptionHandler(objc_exception_handler);
 }
 
-uint64_t plat_ticks_us(void) {
+static uint64_t raw_ticks_us(void) {
     static mach_timebase_info_data_t tb;
     if (!tb.denom) mach_timebase_info(&tb);
     return mach_absolute_time() * tb.numer / tb.denom / 1000;
 }
 
+// Game pause (E:\ios-ports\README.md section 10), as in the FF7 port: while the app is inactive or a window is
+// over the game (settings and its choices, the PC transfer screen, the button editor, a save sync) the game's
+// clock stands still, the game threads wait in plat_sleep_* (the swap pacing sleeps there every frame) and the
+// sound is silent. The clock then goes on from where it stopped, so nothing jumps.
+static int g_app_active = 1, g_ui_pause;
+static int g_running = 1;
+static pthread_mutex_t g_clock_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_paused_us, g_pause_begin;
+
+uint64_t plat_ticks_us(void) {
+    pthread_mutex_lock(&g_clock_lock);
+    uint64_t now = __atomic_load_n(&g_running, __ATOMIC_RELAXED) ? raw_ticks_us() : g_pause_begin;
+    uint64_t result = now >= g_paused_us ? now - g_paused_us : 0;
+    pthread_mutex_unlock(&g_clock_lock);
+    return result;
+}
+static void update_running_locked(void) {
+    int old = __atomic_load_n(&g_running, __ATOMIC_RELAXED);
+    int run = g_app_active && !g_ui_pause;
+    if (old == run) return;
+    uint64_t now = raw_ticks_us();
+    if (run) { if (now >= g_pause_begin) g_paused_us += now - g_pause_begin; }
+    else g_pause_begin = now;
+    __atomic_store_n(&g_running, run, __ATOMIC_RELEASE);
+}
+static void set_app_active(int active) {
+    pthread_mutex_lock(&g_clock_lock);
+    g_app_active = active;
+    update_running_locked();
+    pthread_mutex_unlock(&g_clock_lock);
+}
+static void set_ui_pause(int pause) {
+    pthread_mutex_lock(&g_clock_lock);
+    int changed = g_ui_pause != pause;
+    g_ui_pause = pause;
+    update_running_locked();
+    pthread_mutex_unlock(&g_clock_lock);
+    if (changed) plat_log("game %s for a window", pause ? "paused" : "resumed");
+}
+static int game_running_now(void) { return __atomic_load_n(&g_running, __ATOMIC_ACQUIRE); }
+
 void plat_sleep_ms(uint32_t ms) {
+    while (!game_running_now()) usleep(50000);
     if (!ms) { sched_yield(); return; }
     usleep(ms * 1000);
 }
-void plat_sleep_us(uint32_t us) { usleep(us); }
+void plat_sleep_us(uint32_t us) {
+    while (!game_running_now()) usleep(50000);
+    usleep(us);
+}
 
 // The game thread only reads an atomic cap. UIKit notifications update power
 // state on the main thread, so no Objective-C thermal query is made per swap.
-static int g_fps_setting = 60, g_thermal_state, g_low_power, g_app_active = 1;
+static int g_fps_setting = 60, g_thermal_state, g_low_power;
 static atomic_int g_effective_frame_cap = 60;
 static Nfs4PowerPolicy g_power_policy;
 static void update_power_cap(void) {
@@ -275,12 +321,34 @@ int plat_pump(void) { return 1; }
 static OSStatus audio_render(void *ref, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *ts, UInt32 bus,
                              UInt32 frames, AudioBufferList *io) {
     (void)ref; (void)flags; (void)ts; (void)bus;
+    // paused: the play cursors stand with the clock, so mixing would repeat the same few milliseconds
+    if (!game_running_now()) { memset(io->mBuffers[0].mData, 0, (size_t)frames * 2 * sizeof(float)); return noErr; }
     hle_audio_mix((float *)io->mBuffers[0].mData, (int)frames, 44100);
     return noErr;
 }
 
+// Sound (README section 10): Playback, so the ring/silent switch does not mute the game (it did under Ambient).
+// "다른 앱 소리와 함께" (default on) mixes other apps' audio in. The game's music cannot be told apart from its
+// effects here (every sound is a DirectSound buffer the game streams into), so music is not silenced on its own
+// while another app plays; with mixing on both simply play together.
+static NSString *const kMixAudio = @"mixOtherAudio";
+static BOOL mix_audio_on(void) {
+    NSNumber *v = [[NSUserDefaults standardUserDefaults] objectForKey:kMixAudio];
+    return v ? v.boolValue : YES;
+}
+static void apply_audio_mix(void) {
+    BOOL mix = mix_audio_on();
+    NSError *err = nil;
+    AVAudioSession *s = [AVAudioSession sharedInstance];
+    if (![s setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault
+                options:mix ? AVAudioSessionCategoryOptionMixWithOthers : 0 error:&err])
+        plat_log("audio: setCategory failed: %s", err.localizedDescription.UTF8String);
+    plat_log("audio: category %s, mix with others %s, other audio playing %d", s.category.UTF8String, mix ? "on" : "off",
+             (int)s.secondaryAudioShouldBeSilencedHint);
+}
+
 static void start_audio(void) {
-    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryAmbient error:nil];
+    apply_audio_mix();
     [[AVAudioSession sharedInstance] setActive:YES error:nil];
     AudioComponentDescription d = { kAudioUnitType_Output, kAudioUnitSubType_RemoteIO, kAudioUnitManufacturer_Apple, 0, 0 };
     AudioComponent comp = AudioComponentFindNext(NULL, &d);
@@ -341,6 +409,7 @@ static volatile int g_game_running;
 
 static void game_main(void *p) {
     (void)p;
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);   // the game's main loop: frames come out more evenly
     g_game_running = 1;
     rt_boot();
     plat_log("game ended");
@@ -463,9 +532,9 @@ static NSString *const kShader =
     g_thermal_state=(int)NSProcessInfo.processInfo.thermalState;
     g_low_power=NSProcessInfo.processInfo.lowPowerModeEnabled;
     if([notification.name isEqualToString:UIApplicationWillResignActiveNotification]) {
-        g_app_active=0; self.paused=YES;
+        set_app_active(0); self.paused=YES;   // the game stops with the clock (plat_ticks_us)
     } else if([notification.name isEqualToString:UIApplicationDidBecomeActiveNotification]) {
-        g_app_active=1; self.paused=NO; _hasPresented=NO;
+        set_app_active(1); self.paused=NO; _hasPresented=NO;
     }
     update_power_cap();
     self.preferredFramesPerSecond=plat_frame_cap();
@@ -889,9 +958,180 @@ static BOOL import_incomplete(void) {
     NSString *game = [port_data_root() stringByAppendingPathComponent:@"game"];
     NSFileManager *fm = NSFileManager.defaultManager;
     if ([fm fileExistsAtPath:[game stringByAppendingPathComponent:kImportMarker]]) return YES;
+    // Every transfer since the marker exists keeps it until it finishes, so a leftover *.part without it can only
+    // come from an older build: the game folder is walked once, not on every launch (README section 9).
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([d boolForKey:@"partScanDone"]) return NO;
     for (NSString *rel in [fm enumeratorAtPath:game])
         if ([rel.pathExtension isEqualToString:@"part"]) return YES;
+    [d setBool:YES forKey:@"partScanDone"];
     return NO;
+}
+
+// "건너뛰고 게임 시작" after a stopped update: the marker and the unfinished pieces go, the game files already
+// replaced are whole (each is moved into place only once it is complete)
+static void drop_unfinished_import(void) {
+    NSString *game = [port_data_root() stringByAppendingPathComponent:@"game"];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    [fm removeItemAtPath:[game stringByAppendingPathComponent:kImportMarker] error:nil];
+    for (NSString *rel in [fm enumeratorAtPath:game])
+        if ([rel.pathExtension isEqualToString:@"part"]) [fm removeItemAtPath:[game stringByAppendingPathComponent:rel] error:nil];
+}
+
+// ---- save sharing between devices (README section 4, port_save_sync.m)
+// Everything the game writes lands in <data root>/save, laid out like the game folder (the save overlay, hle.c),
+// so the server keeps them as saves\NFS4\save\<path in the game folder>. The host's logs and debug notes stay here.
+static void configure_save_sync(void) {
+    port_sync_configure(@"NFS4", port_data_root(), @[ @"save" ], @[ @"log", @"txt", @"part" ]);
+}
+static NSString *sync_state_text(void) {
+    NSString *folder = port_sync_folder_name();
+    BOOL pc = port_sync_pc();
+    if (folder && pc) return [folder stringByAppendingString:@" + PC"];
+    if (folder) return folder;
+    return pc ? @"PC" : @"꺼짐";
+}
+
+// ---- the PC: the address the game was received from, then the known ones (README section 9)
+static BOOL probe_address(NSURLSession *s, NSString *address, NSString *app);
+static NSData *fetch_data(NSURLSession *s, NSURL *url, NSInteger *status, NSError **err);
+static NSURL *address_url(NSString *address);
+static NSArray<NSString *> *known_pc_hosts(void) {
+    NSMutableArray<NSString *> *hosts = [NSMutableArray array];
+    NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:kImportAddress] ?: @"";
+    for (NSString *a in @[ saved, @"192.168.0.2:8765", @"100.99.113.123:8765" ]) {
+        NSString *h = [a stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([h hasPrefix:@"http://"]) h = [h substringFromIndex:7];
+        while ([h hasSuffix:@"/"]) h = [h substringToIndex:h.length - 1];
+        if (h.length && ![h containsString:@":"]) h = [h stringByAppendingString:@":8765"];
+        if (h.length && ![hosts containsObject:h]) [hosts addObject:h];
+    }
+    return hosts;
+}
+
+// ---- diagnostics (README section 10): the host logs and the last crash, as one text
+static NSString *const kCrashLog = @"nfs4crash-last.log";   // in save: the log of a run that crashed, until sent
+static NSString *const kDiagPending = @"diagPending";       // a crash not yet sent to the PC
+
+static NSString *diag_text(void) {
+    NSString *save = [port_data_root() stringByAppendingPathComponent:@"save"];
+    NSDictionary *info = NSBundle.mainBundle.infoDictionary;
+    NSMutableString *out = [NSMutableString stringWithFormat:@"NFS4 v%@ (b%@)  %@ iOS %@  %@\n", info[@"CFBundleShortVersionString"] ?: @"?",
+                            info[@"CFBundleVersion"] ?: @"?", UIDevice.currentDevice.model, UIDevice.currentDevice.systemVersion, [NSDate date]];
+    [out appendFormat:@"thermal %ld, low power %d, save sharing %@\n", (long)NSProcessInfo.processInfo.thermalState,
+                      NSProcessInfo.processInfo.lowPowerModeEnabled, sync_state_text()];
+    const NSUInteger tail = 400000;                       // characters kept from the end of each log
+    BOOL any = NO;
+    for (NSString *name in @[ kCrashLog, @"nfs4host.log", @"nfs4host.prev.log", @"nfs4host.segment.log", @"missing_seeds.txt" ]) {
+        NSData *d = [NSData dataWithContentsOfFile:[save stringByAppendingPathComponent:name]];
+        if (!d) continue;
+        NSString *t = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
+                      ?: [[NSString alloc] initWithData:d encoding:NSISOLatin1StringEncoding] ?: @"";
+        if (t.length > tail) t = [@"…\n" stringByAppendingString:[t substringFromIndex:t.length - tail]];
+        [out appendFormat:@"\n===== %@ (%lu bytes) =====\n%@\n", name, (unsigned long)d.length, t];
+        any = YES;
+    }
+    if (!any) [out appendString:@"\n(기록이 아직 없습니다.)\n"];
+    return out;
+}
+
+// POST /api/diag/NFS4/<name> to the first host that takes it (blocking, off the main thread); the host or nil
+static NSString *post_diag(NSData *body, NSString *name, NSTimeInterval timeout) {
+    NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    config.timeoutIntervalForRequest = timeout;
+    config.connectionProxyDictionary = @{};   // straight to the PC, past any VPN/proxy app
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSString *sent = nil;
+    for (NSString *host in known_pc_hosts()) {
+        NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"http://%@/api/diag/NFS4/%@", host, name]];
+        if (!url) continue;
+        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+        req.HTTPMethod = @"POST";
+        [req setValue:@"text/plain; charset=utf-8" forHTTPHeaderField:@"Content-Type"];
+        __block NSInteger code = 0;
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        [[session uploadTaskWithRequest:req fromData:body completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            if (!e && [r isKindOfClass:NSHTTPURLResponse.class]) code = ((NSHTTPURLResponse *)r).statusCode;
+            dispatch_semaphore_signal(done);
+        }] resume];
+        dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+        if (code == 200) { sent = host; break; }
+    }
+    [session finishTasksAndInvalidate];
+    return sent;
+}
+
+static NSString *diag_name(NSString *kind) {
+    NSDateFormatter *f = [NSDateFormatter new];
+    f.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    f.dateFormat = @"yyyyMMdd-HHmmss";
+    return [NSString stringWithFormat:@"%@-%@.txt", kind, [f stringFromDate:[NSDate date]]];
+}
+
+// The previous run's log (just renamed to nfs4host.prev.log) ended in a crash: keep it apart, so a later
+// launch still has it, and send it to the PC when one answers (quietly, short waits).
+static void handle_last_crash(void) {
+    NSString *save = [port_data_root() stringByAppendingPathComponent:@"save"];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSString *prev = [save stringByAppendingPathComponent:@"nfs4host.prev.log"];
+    NSData *data = [NSData dataWithContentsOfFile:prev];
+    const char *crash = "\nCRASH:", *fatal = "\nFATAL:";
+    if (data && ([data rangeOfData:[NSData dataWithBytes:crash length:strlen(crash)] options:0 range:NSMakeRange(0, data.length)].length ||
+                 [data rangeOfData:[NSData dataWithBytes:fatal length:strlen(fatal)] options:0 range:NSMakeRange(0, data.length)].length)) {
+        NSString *keep = [save stringByAppendingPathComponent:kCrashLog];
+        [fm removeItemAtPath:keep error:nil];
+        [fm copyItemAtPath:prev toPath:keep error:nil];
+        [d setBool:YES forKey:kDiagPending];
+        plat_log("diag: the last run crashed; its log is kept as %s", kCrashLog.UTF8String);
+    }
+    if (![d boolForKey:kDiagPending]) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *host = post_diag([diag_text() dataUsingEncoding:NSUTF8StringEncoding], diag_name(@"crash"), 2);
+        if (!host) { plat_log("diag: crash record not sent (no PC)"); return; }
+        [d setBool:NO forKey:kDiagPending];
+        plat_log("diag: crash record sent to %s", host.UTF8String);
+    });
+}
+
+// ---- update check before the game starts (README section 9, as renpy-ios-player offerUpdate): only the last
+// PC and the known addresses, about 1.5 s at most when no PC is there. How many files the PC has that are missing
+// here or differ in size (bytes: their total); 0 when none or no PC.
+static NSUInteger pending_update_files(long long *bytes) {
+    *bytes = 0;
+    NSURLSessionConfiguration *config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
+    config.timeoutIntervalForRequest = 1.2;
+    config.connectionProxyDictionary = @{};
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSString *app = NSBundle.mainBundle.infoDictionary[@"PortDataFolder"] ?: @"NFS4";
+    __block NSString *found = nil;
+    NSObject *lock = [NSObject new];
+    dispatch_group_t group = dispatch_group_create();
+    for (NSString *a in known_pc_hosts())
+        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            if (probe_address(session, a, app))
+                @synchronized (lock) { if (!found) found = a; }
+        });
+    dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)));
+    NSString *address;
+    @synchronized (lock) { address = found; }
+    NSUInteger count = 0;
+    if (address) {
+        NSInteger code = 0;
+        NSData *data = fetch_data(session, [[address_url(address) URLByAppendingPathComponent:@"api/manifest"] URLByAppendingPathComponent:app], &code, NULL);
+        NSDictionary *manifest = code == 200 && data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        NSString *dest = [port_data_root() stringByAppendingPathComponent:@"game"];
+        NSFileManager *fm = NSFileManager.defaultManager;
+        if ([manifest isKindOfClass:NSDictionary.class])
+            for (NSDictionary *f in manifest[@"files"]) {
+                long long want = [f[@"s"] longLongValue];
+                NSNumber *size = [fm attributesOfItemAtPath:[dest stringByAppendingPathComponent:f[@"p"]] error:nil][NSFileSize];
+                if (!size || size.longLongValue != want) { count++; *bytes += want; }
+            }
+        plat_log("update check: %s has %lu new/changed files (%lld bytes)", address.UTF8String, (unsigned long)count, *bytes);
+    }
+    [session finishTasksAndInvalidate];
+    return count;
 }
 
 @interface GameViewController : UIViewController <UIDocumentPickerDelegate, UIGestureRecognizerDelegate, UITextFieldDelegate>
@@ -911,9 +1151,12 @@ static BOOL import_incomplete(void) {
 @property(nonatomic) NSString *selected;
 @property(nonatomic) UIStackView *setup;
 @property(nonatomic) UILabel *info, *pcStatus;
-@property(nonatomic) UIButton *importButton, *pcButton, *closeButton;
+@property(nonatomic) UIButton *importButton, *pcButton, *closeButton, *skipButton;
 @property(nonatomic) UITextField *pcField;
 @property(nonatomic) UIProgressView *pcBar;
+@property(nonatomic) BOOL syncing;       // a save sync from 설정 is running: the game stays paused
+@property(nonatomic) BOOL pickingSync;   // the folder picker is for the save sharing folder
+@property(nonatomic) BOOL gameFound;     // nfs4.exe is here (a stopped update can be skipped)
 @end
 
 @implementation GameViewController
@@ -934,6 +1177,7 @@ static BOOL import_incomplete(void) {
     [[NSNotificationCenter defaultCenter] addObserverForName:@"NFS4Fatal" object:nil queue:nil
                                                   usingBlock:^(NSNotification *n) { [self showMessage:n.object import:NO]; }];
     [[NSUserDefaults standardUserDefaults] registerDefaults:@{ @"wide" : @YES, @"msaa" : @YES }];
+    configure_save_sync();
 }
 
 // started here rather than in viewDidLoad: the safe area (Dynamic Island) is known by now
@@ -958,28 +1202,41 @@ static BOOL import_incomplete(void) {
 
 - (void)showSettings {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    UIAlertController *a = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"설정 · NFS4 %@", app_version()]
-        message:@"화면비·안티에일리어싱은 다음 실행부터 적용됩니다.\n와이드: 레이스 최대 16:9 (메뉴 4:3)\n발열·저전력 모드에서는 자동 프레임 제한, 식은 뒤 선택한 설정으로 복귀" preferredStyle:UIAlertControllerStyleActionSheet];
+    // order as in README section 10: title, save sharing, other apps' sound, screen, pad, diagnostics, help, close
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"NFS4 v%@", app_version()]
+        message:@"설정 창이 열려 있는 동안 게임은 멈춥니다." preferredStyle:UIAlertControllerStyleActionSheet];
+    [a addAction:[UIAlertAction actionWithTitle:[@"세이브 공유 · " stringByAppendingString:sync_state_text()]
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { [self showSaveSharing]; }]];
+    BOOL mix = mix_audio_on();
+    [a addAction:[UIAlertAction actionWithTitle:mix ? @"다른 앱 소리와 함께 · 켬" : @"다른 앱 소리와 함께 · 끔"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+            [d setBool:!mix forKey:kMixAudio];
+            apply_audio_mix();                 // at once
+        }]];
     BOOL wide = [d boolForKey:@"wide"], msaa = [d boolForKey:@"msaa"];
-    [a addAction:[UIAlertAction actionWithTitle:wide ? @"화면비: 와이드 ✓ → 원본 4:3로" : @"화면비: 원본 4:3 ✓ → 와이드로"
+    [a addAction:[UIAlertAction actionWithTitle:wide ? @"화면비 · 와이드 (다음 실행부터)" : @"화면비 · 원본 4:3 (다음 실행부터)"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { [d setBool:!wide forKey:@"wide"]; }]];
-    [a addAction:[UIAlertAction actionWithTitle:msaa ? @"안티에일리어싱 4x ✓ → 끄기" : @"안티에일리어싱 꺼짐 → 4x 켜기"
+    [a addAction:[UIAlertAction actionWithTitle:msaa ? @"안티에일리어싱 · 4x (다음 실행부터)" : @"안티에일리어싱 · 끔 (다음 실행부터)"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { [d setBool:!msaa forKey:@"msaa"]; }]];
     BOOL fps30 = [d boolForKey:@"fps30"];
-    [a addAction:[UIAlertAction actionWithTitle:fps30 ? @"절전 30fps ✓ → 60fps로 (바로 적용)" : @"60fps ✓ → 절전 30fps로 (바로 적용)"
+    [a addAction:[UIAlertAction actionWithTitle:fps30 ? @"프레임 · 절전 30fps" : @"프레임 · 60fps"
         style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
             [d setBool:!fps30 forKey:@"fps30"];
             g_fps_setting = fps30 ? 60 : 30;
             update_power_cap();
         }]];
-    [a addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"버튼 투명도 (지금 %.0f%%)", [self overlayAlpha] * 100]
-        style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { [self askOverlayAlpha]; }]];
-    [a addAction:[UIAlertAction actionWithTitle:@"PC에서 받기 (게임 파일 업데이트)" style:UIAlertActionStyleDefault
-        handler:^(UIAlertAction *x) { [self showPCUpdate]; }]];
-    [a addAction:[UIAlertAction actionWithTitle:@"키보드 입력 (이름·코드)" style:UIAlertActionStyleDefault
-        handler:^(UIAlertAction *x) { [self askText]; }]];
-    [a addAction:[UIAlertAction actionWithTitle:@"터치 버튼 편집 (위치·크기·진동·투명도)" style:UIAlertActionStyleDefault
+    [a addAction:[UIAlertAction actionWithTitle:@"패드 배치 · 위치·크기·진동" style:UIAlertActionStyleDefault
         handler:^(UIAlertAction *x) { [self startEditing]; }]];
+    [a addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"패드 투명도 · %.0f%%", [self overlayAlpha] * 100]
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { [self askOverlayAlpha]; }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"키보드 입력 · 이름·코드" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *x) { [self askText]; }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"PC에서 받기 · 게임 파일 업데이트" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *x) { [self showPCUpdate]; }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"PC로 진단 보내기" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *x) { [self sendDiagnostics:NO]; }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"도움말" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *x) { [self showHelp]; }]];
     [a addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
     a.popoverPresentationController.sourceView = self.view;
     a.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, 40, 1, 1);
@@ -1007,6 +1264,171 @@ static NSString *app_version(void) {
     a.popoverPresentationController.sourceView = self.view;
     a.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, 40, 1, 1);
     [self presentViewController:a animated:YES completion:nil];
+}
+
+// ---- game pause (README section 10): any window over the game pauses it at once; the 0.25 s timer in
+// buildControls lets it go once nothing is over it any more (an alert has no "did close" of its own)
+- (void)presentViewController:(UIViewController *)vc animated:(BOOL)animated completion:(void (^)(void))completion {
+    if (g_game_running) set_ui_pause(1);
+    [super presentViewController:vc animated:animated completion:completion];
+}
+
+- (BOOL)wantsPause {
+    return self.presentedViewController || g_overlay_editing || _syncing || (_setup && !_setup.hidden);
+}
+
+- (void)updatePause {
+    if (g_game_running) set_ui_pause([self wantsPause]);
+}
+
+- (void)showHelp {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"도움말"
+        message:@"• 화면비 와이드: 레이스 최대 16:9, 메뉴는 4:3. 화면비·안티에일리어싱은 다음 실행부터 적용됩니다.\n"
+                "• 발열·저전력 모드에서는 프레임을 자동으로 낮추고, 식은 뒤 고른 설정으로 돌아갑니다.\n"
+                "• 설정·창·버튼 편집이 열려 있거나 앱을 벗어나 있는 동안 게임은 멈춥니다.\n"
+                "• 세이브 공유: 파일 앱 폴더(iCloud Drive 등)나 PC로 다른 기기와 세이브를 맞춥니다. 게임 시작 전과 앱을 벗어날 때 맞춥니다.\n"
+                "• 문제가 생기면 'PC로 진단 보내기'를 누르세요. 튕긴 다음 실행에서 PC가 보이면 기록을 자동으로 보냅니다.\n"
+                "• 기록 위치: 파일 앱 › LiveContainer › Games › NFS4 › save 의 nfs4host.log"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+// a short note at the bottom of the screen that fades by itself
+- (void)showToast:(NSString *)text {
+    UILabel *l = [UILabel new];
+    l.text = [NSString stringWithFormat:@"  %@  ", text];
+    l.font = [UIFont boldSystemFontOfSize:14];
+    l.textColor = UIColor.whiteColor;
+    l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.65];
+    l.layer.cornerRadius = 8;
+    l.clipsToBounds = YES;
+    [l sizeToFit];
+    l.bounds = CGRectMake(0, 0, l.bounds.size.width, l.bounds.size.height + 12);
+    l.center = CGPointMake(self.view.bounds.size.width / 2, self.view.bounds.size.height - 40);
+    l.userInteractionEnabled = NO;
+    [self.view addSubview:l];
+    [UIView animateWithDuration:0.4 delay:2.5 options:0 animations:^{ l.alpha = 0; } completion:^(BOOL f) { [l removeFromSuperview]; }];
+}
+
+- (void)showNote:(NSString *)title text:(NSString *)text {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:title message:text preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"확인" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+// ---- save sharing (README section 4)
+
+- (void)showSaveSharing {
+    NSString *folder = port_sync_folder_name();
+    BOOL pc = port_sync_pc();
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:[@"세이브 공유 · " stringByAppendingString:sync_state_text()]
+        message:@"파일 앱 폴더(iCloud Drive 등)나 PC(PC에서-받기-서버)로 다른 기기와 세이브를 맞춥니다. 게임 시작 전에 맞추고, 앱을 벗어날 때는 올리기만 합니다."
+        preferredStyle:UIAlertControllerStyleActionSheet];
+    [a addAction:[UIAlertAction actionWithTitle:@"지금 맞추기" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { [self syncNow:0]; }]];
+    [a addAction:[UIAlertAction actionWithTitle:folder ? [@"공유 폴더 · " stringByAppendingString:folder] : @"공유 폴더 · 고르기"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+            self.pickingSync = YES;
+            [self pickFolder];
+        }]];
+    if (folder)
+        [a addAction:[UIAlertAction actionWithTitle:@"공유 폴더 끄기" style:UIAlertActionStyleDestructive
+            handler:^(UIAlertAction *x) { port_sync_set_folder(nil); }]];
+    [a addAction:[UIAlertAction actionWithTitle:pc ? @"PC와 공유 · 켬" : @"PC와 공유 · 끔" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *x) {
+            port_sync_set_pc(!pc);
+            if (!pc) [self syncNow:0];
+        }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+    a.popoverPresentationController.sourceView = self.view;
+    a.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, 40, 1, 1);
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+// Where a save changed on both sides the player says which is kept (the other is not lost: the PC keeps what it
+// replaces under saves\NFS4\.history, this device under save-backup).
+- (void)askSyncConflict:(void (^)(int resolve))answer {
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"세이브가 양쪽에서 바뀌었습니다"
+        message:@"이 기기와 다른 기기(공유 폴더·PC)에서 같은 세이브가 각각 바뀌었습니다. 어느 쪽을 쓸까요?"
+        preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"이 기기 세이브" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { answer(1); }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"다른 기기 세이브" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) { answer(-1); }]];
+    [a addAction:[UIAlertAction actionWithTitle:@"나중에" style:UIAlertActionStyleCancel handler:^(UIAlertAction *x) { answer(0); }]];
+    [self presentViewController:a animated:YES completion:nil];
+}
+
+// before the game reads its saves; then on to the game
+- (void)syncAtStart:(int)resolve then:(void (^)(void))next {
+    port_sync_run_start(resolve, ^(NSString *summary, BOOL conflict, BOOL changed) {
+        plat_log("save sync (start): %s", summary.UTF8String);
+        if ([summary containsString:@"PC 세이브는 확인 못 함"]) [self showToast:@"PC 세이브는 확인 못 함"];
+        if (!conflict) { next(); return; }
+        [self askSyncConflict:^(int r) {
+            if (r) [self syncAtStart:r then:next];
+            else next();
+        }];
+    });
+}
+
+// from 설정: the game stays paused while it runs. A save that came down is read by the game the next time it
+// loads it; reopening the app is the sure way.
+- (void)syncNow:(int)resolve {
+    if (!port_sync_configured()) { [self showNote:@"세이브 공유" text:@"공유 폴더를 고르거나 'PC와 공유'를 켜세요."]; return; }
+    _syncing = YES;
+    [self updatePause];
+    [self showToast:@"세이브 맞추는 중…"];
+    port_sync_run(resolve, NO, ^(NSString *summary, BOOL conflict, BOOL changed) {
+        plat_log("save sync: %s", summary.UTF8String);
+        if (conflict) {
+            [self askSyncConflict:^(int r) {
+                if (r) [self syncNow:r];
+                else { self.syncing = NO; [self updatePause]; }
+            }];
+            return;
+        }
+        self.syncing = NO;
+        NSString *text = changed && g_game_running ? [summary stringByAppendingString:@"\n받은 세이브는 앱을 완전히 종료했다가 다시 열면 확실히 반영됩니다."] : summary;
+        [self showNote:@"세이브 공유" text:text];
+    });
+}
+
+// ---- diagnostics to the PC (README section 10)
+- (void)sendDiagnostics:(BOOL)quiet {
+    if (!quiet) [self showToast:@"PC로 보내는 중…"];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSData *body = [diag_text() dataUsingEncoding:NSUTF8StringEncoding];
+        NSString *host = post_diag(body, diag_name(@"diag"), 6);
+        if (host) [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kDiagPending];   // the crash went with it
+        plat_log("diag: %s", host ? [@"sent to " stringByAppendingString:host].UTF8String : "no PC answered");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (quiet) return;
+            if (host) [self showNote:@"PC로 진단 보내기" text:[NSString stringWithFormat:@"%@(으)로 보냈습니다 (%lu KB).", host, (unsigned long)(body.length + 1023) / 1024]];
+            else [self showNote:@"PC로 진단 보내기" text:@"PC를 찾지 못했습니다. PC에서 받기 서버가 켜져 있고 같은 와이파이인지 확인해 주세요."];
+        });
+    });
+}
+
+// ---- update check before the game starts: the PC has new or changed game files (e.g. a car pack added to its
+// overlay folder) -> ask; "받기" fetches only those, "건너뛰고 게임 시작" goes on with the game as it is
+- (void)offerUpdateThen:(void (^)(void))next {
+    [self showMessage:@"PC에 업데이트가 있는지 확인하는 중…" import:NO];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        long long bytes = 0;
+        NSUInteger count = pending_update_files(&bytes);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!count) { next(); return; }
+            UIAlertController *a = [UIAlertController alertControllerWithTitle:@"PC에 새 파일이 있습니다"
+                message:[NSString stringWithFormat:@"새 파일·바뀐 파일 %lu개 (%.1f MB)를 받을까요?", (unsigned long)count, bytes / 1e6]
+                preferredStyle:UIAlertControllerStyleAlert];
+            [a addAction:[UIAlertAction actionWithTitle:@"건너뛰고 게임 시작" style:UIAlertActionStyleCancel handler:^(UIAlertAction *x) { next(); }]];
+            [a addAction:[UIAlertAction actionWithTitle:@"받기" style:UIAlertActionStyleDefault handler:^(UIAlertAction *x) {
+                self.pcStatus.text = @"";
+                [self showMessage:@"PC에서 받기\n\nPC와 다른 파일만 받습니다. 다 받으면 게임이 시작됩니다." import:YES];
+                [self startPCImport];
+            }]];
+            [self presentViewController:a animated:YES completion:nil];
+        });
+    });
 }
 
 // DirectInput scan codes of the characters the game's text fields take
@@ -1037,6 +1459,9 @@ static uint8_t char_scan(unichar ch) {
     void (^send)(BOOL, BOOL) = ^(BOOL clear, BOOL enter) {
         NSString *text = weak.textFields.firstObject.text ?: @"";
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            // the game is paused while this window closes: type only once it runs again, or presses go unseen
+            for (int i = 0; i < 40 && !game_running_now(); i++) usleep(50000);
+            usleep(100000);
             // a name box opens full with the old name (up to 10 letters): Backspace it away first
             if (clear) for (int i = 0; i < 16; i++) { key(0x0E, 1); usleep(30000); key(0x0E, 0); usleep(30000); }
             for (NSUInteger i = 0; i < text.length; i++) {
@@ -1105,7 +1530,12 @@ static uint8_t char_scan(unichar ch) {
         _closeButton.titleLabel.font = [UIFont systemFontOfSize:15];
         [_closeButton addTarget:self action:@selector(closeSetup) forControlEvents:UIControlEventTouchUpInside];
 
-        _setup = [[UIStackView alloc] initWithArrangedSubviews:@[ _info, pcRow, _pcBar, _pcStatus, _importButton, _closeButton ]];
+        _skipButton = [UIButton buttonWithType:UIButtonTypeSystem];   // a stopped update, the game itself is here
+        [_skipButton setTitle:@"건너뛰고 게임 시작" forState:UIControlStateNormal];
+        _skipButton.titleLabel.font = [UIFont systemFontOfSize:15];
+        [_skipButton addTarget:self action:@selector(skipUpdate) forControlEvents:UIControlEventTouchUpInside];
+
+        _setup = [[UIStackView alloc] initWithArrangedSubviews:@[ _info, pcRow, _pcBar, _pcStatus, _skipButton, _importButton, _closeButton ]];
         _setup.axis = UILayoutConstraintAxisVertical;
         _setup.alignment = UIStackViewAlignmentCenter;
         _setup.spacing = 12;
@@ -1127,12 +1557,28 @@ static uint8_t char_scan(unichar ch) {
     _pcStatus.hidden = !import || !_pcStatus.text.length;
     _importButton.hidden = !import || g_game_running;     // a folder copy replaces the game; only before it runs
     _closeButton.hidden = !import || !g_game_running;
+    _skipButton.hidden = !import || g_game_running || !_gameFound;
     _setup.backgroundColor = g_game_running ? [UIColor colorWithWhite:0 alpha:0.85] : UIColor.clearColor;
+    [self updatePause];                        // the transfer screen over a running game pauses it
 }
 
 - (void)closeSetup {
     [_pcField resignFirstResponder];
     _setup.hidden = YES;
+    [self updatePause];
+}
+
+// a stopped update: its marker and unfinished pieces go, then the game starts with the files it has
+- (void)skipUpdate {
+    _skipButton.enabled = _pcButton.enabled = NO;
+    [self showMessage:@"게임을 시작하는 중…" import:NO];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        drop_unfinished_import();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.skipButton.enabled = self.pcButton.enabled = YES;
+            [self startOrAsk];
+        });
+    });
 }
 
 // ⚙︎ › PC에서 받기 while the game is installed: only files that differ from the PC's are fetched
@@ -1235,7 +1681,7 @@ static NSString *discover_pc(NSArray<NSString *> *preferred, NSString *app) {
     NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:kImportAddress] ?: @"";
     NSString *app = NSBundle.mainBundle.infoDictionary[@"PortDataFolder"] ?: @"NFS4";
     [_pcField resignFirstResponder];
-    _pcButton.enabled = _importButton.enabled = NO;
+    _pcButton.enabled = _importButton.enabled = _skipButton.enabled = NO;
     _pcBar.hidden = NO;
     _pcBar.progress = 0;
     [self pcStatus:@"같은 와이파이에서 PC를 찾는 중…"];
@@ -1257,7 +1703,7 @@ static NSString *discover_pc(NSArray<NSString *> *preferred, NSString *app) {
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             UIApplication.sharedApplication.idleTimerDisabled = NO;
-            self.pcButton.enabled = self.importButton.enabled = YES;
+            self.pcButton.enabled = self.importButton.enabled = self.skipButton.enabled = YES;
             if (error) [self pcStatus:[error stringByAppendingString:@"\n다시 누르면 받은 데까지 건너뛰고 이어서 받습니다."]];
             else if (g_game_running) [self pcStatus:@"다 받았습니다. 앱을 완전히 종료했다가 다시 열면 적용됩니다."];
             else { [self pcStatus:@"다 받았습니다."]; [self startOrAsk]; }
@@ -1401,9 +1847,39 @@ static BOOL append_file(NSString *from, NSString *to) {
     return failure;
 }
 
+// once per launch, before anything is logged: the save folder (moved from the old layout), the log (the last
+// run's kept as nfs4host.prev.log) and, if that run crashed, its record for the PC
+- (void)openSaveAndLog {
+    static BOOL done;
+    if (done) return;
+    done = YES;
+    NSString *root = port_data_root();
+    NSString *save = [root stringByAppendingPathComponent:@"save"];
+    NSString *oldSave = [root stringByAppendingPathComponent:@"NFS4-save"];   // builds before the shared layout
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:save] && [fm fileExistsAtPath:oldSave]) [fm moveItemAtPath:oldSave toPath:save error:nil];
+    snprintf(g_save, sizeof g_save, "%s", save.fileSystemRepresentation);
+    mkdir(g_save, 0755);
+    char logp[1200], prevp[1200];
+    snprintf(logp, sizeof logp, "%s/nfs4host.log", g_save);
+    snprintf(prevp, sizeof prevp, "%s/nfs4host.prev.log", g_save);
+    rename(logp, prevp);                       // keep the last session's log, e.g. after a crash
+    snprintf(g_log.current,sizeof g_log.current,"%s",logp);
+    snprintf(g_log.segment,sizeof g_log.segment,"%s/nfs4host.segment.log",g_save);
+    g_log.file=fopen(logp,"w");g_log.bytes=0;
+    g_console_logging=getenv("NFS4_CONSOLE_LOG")!=NULL;
+#if DEBUG
+    g_console_logging=1;
+#endif
+    install_crash_handlers();
+    plat_log("NFS4 %s", app_version().UTF8String);
+    handle_last_crash();
+}
+
 - (void)startOrAsk {
     if (!g_game_running && import_incomplete()) {
         // an interrupted "PC에서 받기": half-copied data would hang or crash the game
+        _gameFound = locate_game_dir() != nil;   // a stopped update: "건너뛰고 게임 시작" is offered
         _pcStatus.text = @"";
         [self showMessage:[@"PC에서 받기가 끝나지 않았습니다.\n\nPC에서 'PC에서-받기-서버'를 켜고 아래 버튼을 누르면 "
                            "받은 파일은 건너뛰고 이어서 받습니다. 다 받으면 게임이 시작됩니다.\n\nNFS4 " stringByAppendingString:app_version()]
@@ -1420,31 +1896,33 @@ static BOOL append_file(NSString *from, NSString *to) {
                    import:YES];
         return;
     }
+    _gameFound = YES;
+    [self openSaveAndLog];
+    if (g_game_running) { _setup.hidden = YES; [self updatePause]; return; }
+    // the PC may have new game files (README section 9): a quick look before the game, once per launch
+    static BOOL updateChecked;
+    if (!updateChecked) {
+        updateChecked = YES;
+        [self offerUpdateThen:^{ [self startOrAsk]; }];
+        return;
+    }
+    // saves shared with the player's other devices: brought in step before the game reads them (README section 4)
+    static BOOL synced;
+    if (!synced) {
+        synced = YES;
+        if (port_sync_configured()) {
+            [self showMessage:@"세이브를 다른 기기와 맞추는 중…" import:NO];
+            [self syncAtStart:0 then:^{ [self startOrAsk]; }];
+            return;
+        }
+    }
     _setup.hidden = YES;
     NSString *root = port_data_root();
-    NSString *save = [root stringByAppendingPathComponent:@"save"];
-    NSString *oldSave = [root stringByAppendingPathComponent:@"NFS4-save"];   // builds before the shared layout
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:save] && [fm fileExistsAtPath:oldSave]) [fm moveItemAtPath:oldSave toPath:save error:nil];
     snprintf(g_game, sizeof g_game, "%s", dir.fileSystemRepresentation);
-    snprintf(g_save, sizeof g_save, "%s", save.fileSystemRepresentation);
-    mkdir(g_save, 0755);
     // replacement game files (high-resolution textures etc.), laid out like the game folder
     snprintf(g_mods, sizeof g_mods, "%s", [root stringByAppendingPathComponent:@"mods"].fileSystemRepresentation);
     mkdir(g_mods, 0755);
-    char logp[1200], prevp[1200];
-    snprintf(logp, sizeof logp, "%s/nfs4host.log", g_save);
-    snprintf(prevp, sizeof prevp, "%s/nfs4host.prev.log", g_save);
-    rename(logp, prevp);                       // keep the last session's log, e.g. after a crash
-    snprintf(g_log.current,sizeof g_log.current,"%s",logp);
-    snprintf(g_log.segment,sizeof g_log.segment,"%s/nfs4host.segment.log",g_save);
-    g_log.file=fopen(logp,"w");g_log.bytes=0;
-    g_console_logging=getenv("NFS4_CONSOLE_LOG")!=NULL;
-#if DEBUG
-    g_console_logging=1;
-#endif
-    install_crash_handlers();
-    plat_log("NFS4 %s, game folder: %s", app_version().UTF8String, g_game);
+    plat_log("game folder: %s", g_game);
     [self applySettings];
     plat_log("power: initial %d fps, thermal %d, low power %d, active %d",plat_frame_cap(),g_thermal_state,g_low_power,g_app_active);
 
@@ -1455,6 +1933,20 @@ static BOOL append_file(NSString *from, NSString *to) {
     [self setupGamepads];
     start_audio();
     if (!g_game_running) plat_thread_start(game_main, NULL);
+    // leaving the app: new saves go up (nothing is written here while the game runs)
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil
+                                                       queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        if (!port_sync_configured()) return;
+        UIApplication *app = UIApplication.sharedApplication;
+        __block UIBackgroundTaskIdentifier task = [app beginBackgroundTaskWithExpirationHandler:^{
+            [app endBackgroundTask:task];
+            task = UIBackgroundTaskInvalid;
+        }];
+        port_sync_run(0, YES, ^(NSString *summary, BOOL conflict, BOOL changed) {
+            plat_log("save sync (background): %s", summary.UTF8String);
+            if (task != UIBackgroundTaskInvalid) { [app endBackgroundTask:task]; task = UIBackgroundTaskInvalid; }
+        });
+    }];
 }
 
 // ---------------------------------------------------------------- touch overlay
@@ -1648,7 +2140,9 @@ static NSValue *val(CGRect r) { return [NSValue valueWithCGRect:r]; }
     [self layoutOverlay];
 
     // menu or race: the game's Glide window tells (hle_glide_in_menu)
+    // also lets the game go on once no window is over it any more (updatePause)
     [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
+        [self updatePause];
         BOOL m = hle_glide_in_menu() != 0;
         if (m == self.menuMode) return;
         self.menuMode = m;
@@ -1859,6 +2353,7 @@ static NSValue *val(CGRect r) { return [NSValue valueWithCGRect:r]; }
     if (g_overlay_editing) return;
     [self releaseOverlayKeys];
     g_overlay_editing = YES;
+    [self updatePause];                        // the game waits while the buttons are moved
     [self applyOverlayVisibility];             // race controls, also when a gamepad or a menu hid them
     for (UIGestureRecognizer *g in _editGestures) g.enabled = YES;
     if (!_editPanel) _editPanel = [self buildEditPanel];
@@ -1879,6 +2374,7 @@ static NSValue *val(CGRect r) { return [NSValue valueWithCGRect:r]; }
     _gear.hidden = NO;
     [[NSUserDefaults standardUserDefaults] setObject:_layout forKey:kOverlayLayout];
     g_overlay_editing = NO;
+    [self updatePause];
     [self updateOverlay];
 }
 
@@ -1931,8 +2427,17 @@ static NSValue *val(CGRect r) { return [NSValue valueWithCGRect:r]; }
     [self presentViewController:p animated:YES completion:nil];
 }
 
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)c { _pickingSync = NO; }
+
 - (void)documentPicker:(UIDocumentPickerViewController *)c didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     NSURL *src = urls.firstObject;
+    if (_pickingSync) {                        // the save sharing folder, not a game folder
+        _pickingSync = NO;
+        if (!src) return;
+        if (!port_sync_set_folder(src)) { [self showNote:@"세이브 공유" text:@"그 폴더는 쓸 수 없습니다."]; return; }
+        [self syncNow:0];
+        return;
+    }
     if (!src) return;
     [self showMessage:@"복사 중… (수백 MB라 몇 분 걸릴 수 있습니다)" import:NO];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
