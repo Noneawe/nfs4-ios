@@ -34,6 +34,20 @@ $file = Join-Path $outDir "$baseName.ipa"
 if (-not (Test-Path -LiteralPath $file)) {
     python -B (Join-Path $PSScriptRoot 'ci_crypto.py') decrypt (Join-Path $download "$baseName.ipa.aes") $file
     if ($LASTEXITCODE -ne 0) { throw 'Artifact decryption failed.' }
+    # The released package carries the shared app icon (E:\ios-ports\icons, set_ipa_icon.py), as earlier
+    # releases did. The CI package is kept as it came under variants\<name>\<hash> in both histories first.
+    $icon = Join-Path $ArchiveRoot '..\icons\NFS4.png'
+    $iconTool = Join-Path $ArchiveRoot '..\tools\set_ipa_icon.py'
+    if ((Test-Path -LiteralPath $icon) -and (Test-Path -LiteralPath $iconTool)) {
+        $ciHash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        foreach ($base in @($outDir, (Join-Path $ArchiveRoot 'NFS4'))) {
+            $keep = Join-Path $base "variants\$baseName\$ciHash"
+            New-Item -ItemType Directory -Force $keep | Out-Null
+            Copy-Item -LiteralPath $file -Destination (Join-Path $keep "$baseName.ipa") -Force
+        }
+        python -I $iconTool $file $icon
+        if ($LASTEXITCODE -ne 0) { throw 'Applying the app icon failed.' }
+    }
 }
 $info = python -I (Join-Path $PSScriptRoot 'ipa_info.py') $file | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $info.CFBundleShortVersionString -ne $version -or $info.CFBundleVersion -ne $build) {

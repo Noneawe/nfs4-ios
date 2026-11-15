@@ -53,12 +53,44 @@ function Other-App-Hashes {
     return $result
 }
 
-$otherBefore = Other-App-Hashes
-$candidates = @()
-foreach ($dir in @($local, $archive, $latestDir, $Target)) {
-    if (Test-Path -LiteralPath $dir) { $candidates += @(Get-ChildItem -LiteralPath $dir -File -Filter 'NFS4-*.ipa') }
+function Get-Candidates {
+    $found = @()
+    foreach ($dir in @($local, $archive, $latestDir, $Target)) {
+        if (Test-Path -LiteralPath $dir) { $found += @(Get-ChildItem -LiteralPath $dir -File -Filter 'NFS4-*.ipa') }
+    }
+    return $found
 }
+function Same-Dir([string]$A, [string]$B) {
+    [IO.Path]::GetFullPath($A).TrimEnd('\') -ieq [IO.Path]::GetFullPath($B).TrimEnd('\')
+}
+
+$otherBefore = Other-App-Hashes
+$candidates = Get-Candidates
 if (-not $candidates.Count) { throw 'No versioned NFS4 IPA found.' }
+
+# A version whose local copy differs from the shared archive's (the CI package here, the icon-applied one there):
+# the shared archive is the released copy. The local one is kept under variants\<name>\<hash> in both histories
+# first, then replaced by the archive copy. Any other disagreement still stops the run.
+foreach ($group in ($candidates | Group-Object Name)) {
+    $hashes = @($group.Group | ForEach-Object { Hash $_.FullName } | Select-Object -Unique)
+    if ($hashes.Count -eq 1) { continue }
+    $released = $group.Group | Where-Object { Same-Dir $_.DirectoryName $archive } | Select-Object -First 1
+    if (-not $released) { throw "Conflicting copies of $($group.Name) and none in the shared archive; no history overwritten." }
+    $releasedHash = Hash $released.FullName
+    foreach ($copy in $group.Group) {
+        $h = Hash $copy.FullName
+        if ($h -eq $releasedHash) { continue }
+        if (-not (Same-Dir $copy.DirectoryName $local)) { throw "Conflicting copy of $($group.Name) outside the local folder: $($copy.FullName)" }
+        $variant = Join-Path ('variants\' + $copy.BaseName + '\' + $h) $copy.Name
+        Ensure-Copy $copy.FullName (Join-Path $local $variant) $local $h
+        Ensure-Copy $copy.FullName (Join-Path $archive $variant) $archive $h
+        Assert-InRoot $copy.FullName $local
+        Copy-Item -LiteralPath $released.FullName -Destination $copy.FullName -Force
+        if ((Hash $copy.FullName) -ne $releasedHash) { throw "Could not replace $($copy.FullName) with the released copy." }
+        Write-Host "$($copy.Name): local copy kept as $variant, replaced by the released copy"
+    }
+}
+$candidates = Get-Candidates
 $records = @()
 foreach ($group in ($candidates | Group-Object Name)) {
     if ($group.Name -notmatch $pattern) { throw "Unrecognized NFS4 version filename: $($group.Name)" }
