@@ -46,3 +46,4 @@ docs/*
 !docs/install.md
 !docs/building.md
 !docs/imports.md
+!docs/redraw.md

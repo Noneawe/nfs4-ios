@@ -1,0 +1,113 @@
+/* Redrawn track textures (the redraw pack, tools/hd_texture_pack.py): when the game hands Glide a texture whose
+ * pixels are known, the GPU gets the larger redrawn picture instead. Texture coordinates reach the GPU divided by
+ * the Glide size (hle_glide.c gpu_vertex), so a texture of the same shape at any size lines up by itself.
+ *
+ * The key is the picture itself, not where the game keeps it: FNV-1a over the size and every texel cut to 4 bits a
+ * channel plus 1-bit alpha. The game turns its 8-bit palette art into 565, 1555 or 4444 by dropping low bits, so
+ * the same QFS picture gives the same key in every format, and the pack tool can work the key out from the QFS
+ * without running the game.
+ *
+ * Pack: hdtex/<key, 16 hex>.rgba = "HDT1", width, height (u32 little-endian), then RGBA bytes, in the mods folder
+ * or beside nfs4.exe (where "PC에서 받기" puts a PC overlay's files); the mods one wins. No folder, no change. NFS4_ORIGINAL_TEXTURES=1 turns it off; NFS4_DUMP_TEXTURES=<folder> (test host) writes
+ * every texture the game uses there in the same format under its key, for checking the keys against the QFS. */
+#include "plat.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+uint64_t hd_texture_key(const uint32_t *px, int w, int h) {
+    uint64_t k = 1469598103934665603ull;
+#define MIX(b) (k = (k ^ (uint8_t)(b)) * 1099511628211ull)
+    MIX(w); MIX(w >> 8); MIX(h); MIX(h >> 8);
+    for (int i = 0; i < w * h; i++) {
+        uint32_t p = px[i];
+        MIX(((p >> 4) & 0x0F) | ((p >> 8) & 0xF0));        /* R, G high nibbles */
+        MIX(((p >> 20) & 0x0F) | ((p >> 31) << 4));       /* B high nibble, alpha bit */
+    }
+#undef MIX
+    return k;
+}
+
+typedef struct { uint64_t key; int dir; } HdKey;
+static HdKey *g_keys;
+static int g_nkeys, g_loaded;
+static char g_dirs[2][1100];
+
+static void add_key(const char *name, int is_dir, uint32_t size, void *ctx) {
+    int dir = *(const int *)ctx;
+    if (is_dir || size < 12 || strlen(name) != 21 || strcmp(name + 16, ".rgba")) return;
+    char *end;
+    uint64_t k = strtoull(name, &end, 16);
+    if (end != name + 16) return;
+    HdKey *grown = realloc(g_keys, (size_t)(g_nkeys + 1) * sizeof *g_keys);
+    if (!grown) return;
+    g_keys = grown;
+    g_keys[g_nkeys].key = k; g_keys[g_nkeys].dir = dir; g_nkeys++;
+}
+static int cmp_key(const void *a, const void *b) {     /* by key, the first folder first */
+    const HdKey *x = a, *y = b;
+    return x->key != y->key ? (x->key < y->key ? -1 : 1) : x->dir - y->dir;
+}
+static int cmp_find(const void *a, const void *b) {
+    uint64_t x = *(const uint64_t *)a, y = ((const HdKey *)b)->key;
+    return x < y ? -1 : x > y;
+}
+
+static void load_index(void) {
+    g_loaded = 1;
+    if (getenv("NFS4_ORIGINAL_TEXTURES")) return;
+    const char *roots[2] = { plat_mods_dir(), plat_game_dir() };
+    for (int i = 0; i < 2; i++) {
+        if (!roots[i] || !roots[i][0]) continue;
+        snprintf(g_dirs[i], sizeof g_dirs[i], "%s/hdtex", roots[i]);
+        int before = g_nkeys;
+        plat_list_dir(g_dirs[i], add_key, &i);
+        if (g_nkeys > before) plat_log("hd textures: %d redrawn textures in %s", g_nkeys - before, g_dirs[i]);
+    }
+    if (g_nkeys) qsort(g_keys, (size_t)g_nkeys, sizeof *g_keys, cmp_key);
+}
+
+int hle_glide_in_menu(void);
+
+static void dump(uint64_t key, const uint32_t *px, int w, int h) {
+    const char *dir = getenv("NFS4_DUMP_TEXTURES");
+    if (!dir || hle_glide_in_menu()) return;      /* races only: the menus stream thousands of movie tiles */
+    char path[1200];
+    snprintf(path, sizeof path, "%s/%016llx.rgba", dir, (unsigned long long)key);
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return; }
+    f = fopen(path, "wb");
+    if (!f) return;
+    uint32_t head[3] = { 0x31544448u /* "HDT1" */, (uint32_t)w, (uint32_t)h };
+    fwrite(head, sizeof head, 1, f);
+    fwrite(px, 4, (size_t)w * h, f);
+    fclose(f);
+}
+
+/* the redrawn picture for these pixels (malloc'd RGBA, *ow x *oh, same shape), or NULL */
+uint32_t *hd_texture_find(const uint32_t *px, int w, int h, int *ow, int *oh) {
+    if (!g_loaded) load_index();
+    if (!g_nkeys && !getenv("NFS4_DUMP_TEXTURES")) return NULL;
+    uint64_t key = hd_texture_key(px, w, h);
+    dump(key, px, w, h);
+    const HdKey *hit = g_nkeys ? bsearch(&key, g_keys, (size_t)g_nkeys, sizeof *g_keys, cmp_find) : NULL;
+    if (!hit) return NULL;
+    while (hit > g_keys && hit[-1].key == key) hit--;     /* the mods folder's copy, if both have one */
+    char path[1200];
+    snprintf(path, sizeof path, "%s/%016llx.rgba", g_dirs[hit->dir], (unsigned long long)key);
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    uint32_t head[3];
+    uint32_t *out = NULL;
+    if (fread(head, sizeof head, 1, f) == 1 && head[0] == 0x31544448u && head[1] >= (uint32_t)w && head[2] >= (uint32_t)h &&
+        head[1] <= 4096 && head[2] <= 4096 && (uint64_t)head[1] * (uint32_t)h == (uint64_t)head[2] * (uint32_t)w) {
+        out = malloc((size_t)head[1] * head[2] * 4);
+        if (out && fread(out, 4, (size_t)head[1] * head[2], f) != (size_t)head[1] * head[2]) { free(out); out = NULL; }
+    }
+    fclose(f);
+    if (!out) { plat_log("hd textures: %s is not a usable %dx%d redraw", path, w, h); return NULL; }
+    *ow = (int)head[1]; *oh = (int)head[2];
+    static int logged;
+    if (logged++ < 4) plat_log("hd textures: %dx%d -> %dx%d (%016llx)", w, h, *ow, *oh, (unsigned long long)key);
+    return out;
+}

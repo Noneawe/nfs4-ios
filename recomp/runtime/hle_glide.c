@@ -367,7 +367,8 @@ static void shade_pixel(int x, int y, float z, float oow, float sow, float tow, 
 /* ---------------------------------------------------------------- GPU path */
 
 /* decoded texture cache keyed by TMU address + format; downloads invalidate overlaps */
-typedef struct { uint32_t addr, bytes; int format, large_lod, aspect; uint32_t pal; int id, w, h, stale; uint32_t gpu_bytes; uint64_t used; } TexEntry;
+typedef struct { uint32_t addr, bytes; int format, large_lod, aspect; uint32_t pal; int id, w, h, gw, gh, stale; uint32_t gpu_bytes; uint64_t used; } TexEntry;
+uint32_t *hd_texture_find(const uint32_t *px, int w, int h, int *ow, int *oh);   /* hd_textures.c */
 #define TEXCACHE 2048
 static TexEntry g_texcache[TEXCACHE];
 static int g_ntex;
@@ -435,17 +436,6 @@ static int gpu_tex_id(void) {
         memset(e, 0, sizeof *e);
         e->id = -1;
     }
-    if (e->id >= 0 && (e->w != t->w || e->h != t->h)) { gpu_flush(); release_texture(e); }
-    if (e->id < 0) {
-        uint32_t bytes=texture_bytes(t->w,t->h);
-        make_texture_room(bytes,e);
-        e->id=gpu_texture_create(t->w,t->h,1);
-        if(e->id>=0) { e->gpu_bytes=bytes; g_gpu_texture_bytes+=bytes; }
-    }
-    e->used=++g_tex_clock;
-    e->addr = t->addr; e->format = t->format; e->large_lod = t->large_lod; e->aspect = t->aspect;
-    e->w = t->w; e->h = t->h; e->pal = pal; e->stale = 0;
-    e->bytes = tex_mem_required(t->small_lod, t->large_lod, t->aspect, t->format);
     uint32_t *px = malloc((size_t)t->w * t->h * 4);
     int cs = g_clamp_s, ct = g_clamp_t;
     g_clamp_s = g_clamp_t = 1;
@@ -455,7 +445,22 @@ static int gpu_tex_id(void) {
             px[y * t->w + x] = pack_rgba(k.r, k.g, k.b, k.a);
         }
     g_clamp_s = cs; g_clamp_t = ct;
-    gpu_texture_upload(e->id, px);
+    /* a redrawn picture of these pixels (hd_textures.c) goes to the GPU in their place, larger, same shape */
+    int gw = t->w, gh = t->h;
+    uint32_t *hd = hd_texture_find(px, t->w, t->h, &gw, &gh);
+    if (e->id >= 0 && (e->gw != gw || e->gh != gh)) { gpu_flush(); release_texture(e); }
+    if (e->id < 0) {
+        uint32_t bytes=texture_bytes(gw,gh);
+        make_texture_room(bytes,e);
+        e->id=gpu_texture_create(gw,gh,1);
+        if(e->id>=0) { e->gpu_bytes=bytes; g_gpu_texture_bytes+=bytes; }
+    }
+    e->used=++g_tex_clock;
+    e->addr = t->addr; e->format = t->format; e->large_lod = t->large_lod; e->aspect = t->aspect;
+    e->w = t->w; e->h = t->h; e->gw = gw; e->gh = gh; e->pal = pal; e->stale = 0;
+    e->bytes = tex_mem_required(t->small_lod, t->large_lod, t->aspect, t->format);
+    if (e->id >= 0) gpu_texture_upload(e->id, hd ? hd : px);
+    free(hd);
     free(px);
     g_last_tex = (int)(e - g_texcache);
     return e->id;
