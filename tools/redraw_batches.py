@@ -1,6 +1,7 @@
 # A redraw bundle for an image model, laid out like the other ports' (E:\rtk5-upscale\redrawN):
-#   py -3 tools/redraw_batches.py E:/nfs4-upscale <N> <TRACK> [TRACK ...] [--sky]
-# -> E:/nfs4-upscale/redrawN: send/<sheet>.png, todo.txt, boxes.json, 프롬프트.md (answers go to received/)
+#   py -3 tools/redraw_batches.py [--root D:/upscale/NFS4] <N> <TRACK> [TRACK ...] [--sky]
+# -> <root>/redrawN: send/<sheet>.png, todo.txt, boxes.json, 프롬프트.md (answers go to received/)
+# The redraw work lives on D: (the drive with room; E: and F: are short of space), not in the repository.
 # Track textures are 32..128 px squares: nine to a 1024x1024 sheet, each enlarged into a 256 px box on flat grey,
 # 64 px apart. See-through parts are flat magenta (the fit step takes the alpha from the original, not from the
 # answer). Pictures with the same pixels are sent once (boxes.json lists every name that shares a box).
@@ -83,9 +84,15 @@ PROMPT = '''# NFS4 리드로잉: redraw{n}
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    sky = '--sky' in sys.argv
-    root, n, tracks = pathlib.Path(args[0]), int(args[1]), [t.upper() for t in args[2:]]
+    argv = sys.argv[1:]
+    root = pathlib.Path('D:/upscale/NFS4')
+    if '--root' in argv:
+        i = argv.index('--root')
+        root = pathlib.Path(argv[i + 1])
+        del argv[i:i + 2]
+    sky = '--sky' in argv
+    args = [a for a in argv if not a.startswith('--')]
+    n, tracks = int(args[0]), [t.upper() for t in args[1:]]
     index = json.loads((root / 'input' / 'index.json').read_text(encoding='utf-8'))
     out = root / ('redraw%d' % n)
     (out / 'send').mkdir(parents=True, exist_ok=True)

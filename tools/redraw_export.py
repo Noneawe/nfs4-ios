@@ -1,10 +1,13 @@
 # Track textures out of the game's own files, as PNGs for redrawing (the way the other ports' redraws are made:
 # E:\rtk5-ios\art\redraw\README.md). Nothing in the game folder is changed.
-#   py -3 tools/redraw_export.py <game>/data/TRACKS E:/nfs4-upscale [TRACK ...]
-# -> E:/nfs4-upscale/input/<TRACK>/<file>_<nnn>_<name>_<w>x<h>.png and input/index.json
+#   py -3 tools/redraw_export.py [--root D:/upscale/NFS4] [--tracks game/data/TRACKS] [TRACK ...]
+# -> <root>/input/<TRACK>/<file>_<nnn>_<name>_<w>x<h>.png and input/index.json
+# The redraw work lives on D: (the drive with room; E: and F: are short of space), not in the repository.
 # A track's TR0.QFS (TRN0: night) and SKY.QFS are RefPack-compressed SHPI ("FSH") picture lists.
 import sys, struct, json, pathlib
 from PIL import Image
+
+DEFAULT_ROOT = 'D:/upscale/NFS4'
 
 
 def refpack(d):
@@ -111,8 +114,17 @@ def fsh(d):
 
 
 def main():
-    tracks, dest = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-    want = [t.upper() for t in sys.argv[3:]]
+    args = sys.argv[1:]
+    def option(flag, default):
+        if flag in args:
+            i = args.index(flag)
+            value = args[i + 1]
+            del args[i:i + 2]
+            return value
+        return default
+    dest = pathlib.Path(option('--root', DEFAULT_ROOT))
+    tracks = pathlib.Path(option('--tracks', str(pathlib.Path(__file__).resolve().parents[1] / 'game' / 'data' / 'TRACKS')))
+    want = [t.upper() for t in args]
     index = {}
     for track in sorted(p for p in tracks.iterdir() if p.is_dir()):
         if want and track.name.upper() not in want:
