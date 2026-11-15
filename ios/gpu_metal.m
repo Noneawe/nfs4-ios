@@ -8,6 +8,7 @@
 #include "plat.h"
 
 extern int g_screen_height_px;     // set by plat_ios.m on the main thread
+extern int g_screen_width_px;      // likewise (applySettings), 0 until then
 extern int g_msaa_samples;         // 1 or 4, from the in-app setting
 
 static id<MTLDevice> dev;
@@ -92,6 +93,9 @@ int gpu_init(int w, int h) {
     W = w; H = h;
     int screenH = g_screen_height_px > 0 ? g_screen_height_px : 1080;
     S = (float)screenH / (float)h;
+    // a picture wider than the screen's shape (a 16:9 race on an iPad) is fitted to the width, so it is not
+    // rendered at the height's scale only to be scaled down again; phones as wide as the picture keep their size
+    if (g_screen_width_px > 0 && (float)g_screen_width_px / (float)w < S) S = (float)g_screen_width_px / (float)w;
     if (S < 1) S = 1;
     if (S > 3) S = 3;
     TW = (int)(w * S + 0.5f); TH = (int)(h * S + 0.5f);

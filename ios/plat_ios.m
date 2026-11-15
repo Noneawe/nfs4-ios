@@ -25,6 +25,7 @@
 #include <dlfcn.h>
 #include <execinfo.h>
 #include <sys/ucontext.h>
+#include <os/proc.h>
 #include "plat.h"
 #include "rt_host.h"
 #import "port_save_sync.h"
@@ -32,6 +33,7 @@
 void hle_key_event(uint8_t sc, int down);
 id<MTLTexture> gpu_metal_display_texture(uint64_t *serial);
 int g_screen_height_px;            // device height in landscape, used for render upscaling
+int g_screen_width_px;             // width the picture may use (beside the Dynamic Island), the same in pixels
 int g_msaa_samples = 4;            // in-app setting, read by gpu_metal.m
 static float g_wide_aspect;        // aspect of the area beside the Dynamic Island, 0 = keep 4:3
 static BOOL g_overlay_editing;     // overlay editor open: touches move controls, nothing reaches the game
@@ -478,6 +480,13 @@ static NSString *port_data_root(void) {
         }
         [NSFileManager.defaultManager createDirectoryAtPath:[root stringByAppendingPathComponent:@"game"]
                                 withIntermediateDirectories:YES attributes:nil error:nil];
+        // The game and mod data (hundreds of MB) come back from the PC, so they stay out of the iCloud/computer
+        // backup, as in the FF7 port; the saves are in the sibling save folder and stay in it.
+        for (NSString *name in @[ @"game", @"mods" ]) {
+            NSString *p = [root stringByAppendingPathComponent:name];
+            [NSFileManager.defaultManager createDirectoryAtPath:p withIntermediateDirectories:YES attributes:nil error:nil];
+            [[NSURL fileURLWithPath:p isDirectory:YES] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+        }
     });
     return root;
 }
@@ -497,7 +506,8 @@ static NSString *locate_game_dir(void) {
                 for (NSString *e in [fm contentsOfDirectoryAtPath:dir error:nil]) {
                     NSString *p = [dir stringByAppendingPathComponent:e];
                     BOOL isDir = NO;
-                    if ([fm fileExistsAtPath:p isDirectory:&isDir] && isDir && ![e isEqualToString:@"save"])
+                    // a dot folder is a copy from Files still in progress (pickFolder), never the game
+                    if ([fm fileExistsAtPath:p isDirectory:&isDir] && isDir && ![e isEqualToString:@"save"] && ![e hasPrefix:@"."])
                         [next addObject:p];
                 }
             }
@@ -1095,6 +1105,11 @@ static NSString *post_diag(NSData *body, NSString *name, NSTimeInterval timeout)
     return sent;
 }
 
+// the Files app's name for this device's own folder ("나의 iPad" on an iPad)
+static NSString *files_device_name(void) {
+    return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad ? @"나의 iPad" : @"나의 iPhone";
+}
+
 static NSString *diag_name(NSString *kind) {
     NSDateFormatter *f = [NSDateFormatter new];
     f.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
@@ -1227,6 +1242,7 @@ static NSUInteger pending_update_files(long long *bytes) {
     UIEdgeInsets in = self.view.safeAreaInsets;
     CGFloat w = MAX(s.width, s.height) - in.left - in.right, h = MIN(s.width, s.height);
     g_wide_aspect = [d boolForKey:@"wide"] && h > 0 ? (float)(w / h) : 0;
+    g_screen_width_px = (int)(w * UIScreen.mainScreen.nativeScale);
     g_msaa_samples = [d boolForKey:@"msaa"] ? 4 : 1;
     g_fps_setting = [d boolForKey:@"fps30"] ? 30 : 60;
     update_power_cap();
@@ -1772,7 +1788,7 @@ static NSString *discover_pc(NSArray<NSString *> *preferred, NSString *app) {
     _pcBar.hidden = NO;
     _pcBar.progress = 0;
     [self pcStatus:@"같은 와이파이에서 PC를 찾는 중…"];
-    UIApplication.sharedApplication.idleTimerDisabled = YES;       // no auto-lock mid-transfer
+    UIApplication.sharedApplication.idleTimerDisabled = YES;       // no auto-lock mid-transfer (the app keeps it off)
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *address = discover_pc(@[ typed, saved ], app);
         NSString *error;
@@ -1789,7 +1805,8 @@ static NSString *discover_pc(NSArray<NSString *> *preferred, NSString *app) {
             error = [self runPCImportFrom:address_url(address)];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-            UIApplication.sharedApplication.idleTimerDisabled = NO;
+            // left off: the game that starts from here is often played on a gamepad, which does not keep the
+            // screen awake, and the app turns auto-lock off for good at launch anyway (AppDelegate)
             self.pcButton.enabled = self.importButton.enabled = self.skipButton.enabled = YES;
             if (error) [self pcStatus:[error stringByAppendingString:@"\n다시 누르면 받은 데까지 건너뛰고 이어서 받습니다."]];
             else if (g_game_running) [self pcStatus:@"다 받았습니다. 앱을 완전히 종료했다가 다시 열면 적용됩니다."];
@@ -1975,11 +1992,11 @@ static BOOL append_file(NSString *from, NSString *to) {
     }
     NSString *dir = locate_game_dir();
     if (!dir) {
-        [self showMessage:[@"NFS High Stakes PC판 게임 폴더(Modern Patch판 nfs4.exe)가 필요합니다.\n\n"
+        [self showMessage:[NSString stringWithFormat:@"NFS High Stakes PC판 게임 폴더(Modern Patch판 nfs4.exe)가 필요합니다.\n\n"
                            "• PC에서 받기: PC에서 'PC에서-받기-서버'를 켜고, 같은 와이파이에서 아래 버튼을 누르세요 (PC는 자동으로 찾습니다).\n"
                            "• 또는 nfs4.exe가 든 폴더 전체를 파일 앱의 game 폴더에 복사한 뒤 다시 실행하세요.\n"
-                           "   단독 설치: 나의 iPhone › NFS IV › game\n"
-                           "   LiveContainer: LiveContainer › Games › NFS4 › game\n\nNFS4 " stringByAppendingString:app_version()]
+                           "   단독 설치: %@ › NFS IV › game\n"
+                           "   LiveContainer: LiveContainer › Games › NFS4 › game\n\nNFS4 %@", files_device_name(), app_version()]
                    import:YES];
         return;
     }
@@ -2142,6 +2159,9 @@ static NSValue *val(CGRect r) { return [NSValue valueWithCGRect:r]; }
     CGFloat cxL = in.left + leftW / 2, cxR = picX + picW + rightW / 2, cy = sz.height / 2;
     CGFloat k = MIN(1, MIN(leftW, rightW) / 124);       // narrower bars (iPad): smaller buttons
     if (k < 0.5) k = 0.5;
+    // a 4:3 iPad has no bars at all: the buttons then reach over the picture's edge instead of half off the screen
+    cxL = MAX(cxL, in.left + (32 + 26) * k + 4);
+    cxR = MIN(cxR, sz.width - in.right - 38 * k - 4);
     NSDictionary *place = @{
         @"m_up" : @[ @(cxL), @(cy - 58 * k), @52, @52 ], @"m_down" : @[ @(cxL), @(cy + 58 * k), @52, @52 ],
         @"m_left" : @[ @(cxL - 32 * k), @(cy), @52, @52 ], @"m_right" : @[ @(cxL + 32 * k), @(cy), @52, @52 ],
@@ -2533,16 +2553,27 @@ static NSValue *val(CGRect r) { return [NSValue valueWithCGRect:r]; }
     [self showMessage:@"복사 중… (수백 MB라 몇 분 걸릴 수 있습니다)" import:NO];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         BOOL scoped = [src startAccessingSecurityScopedResource];
-        NSString *dst = [[port_data_root() stringByAppendingPathComponent:@"game"] stringByAppendingPathComponent:@"NFS4"];
+        NSString *game = [port_data_root() stringByAppendingPathComponent:@"game"];
+        NSString *dst = [game stringByAppendingPathComponent:@"NFS4"];
+        // Copied beside it first and moved into place only once whole: a copy cut short (the app closed, the
+        // disk full) leaves no half game for locate_game_dir to start, and the game already here stays usable
+        // until then, also when the folder picked is that very copy (나의 iPhone › NFS IV › game › NFS4).
+        NSString *tmp = [game stringByAppendingPathComponent:@".NFS4-copying"];
         NSFileManager *fm = [NSFileManager defaultManager];
-        [fm removeItemAtPath:dst error:nil];
+        [fm removeItemAtPath:tmp error:nil];   // a copy an earlier launch did not finish
         NSError *err = nil;
-        BOOL ok = [fm copyItemAtURL:src toURL:[NSURL fileURLWithPath:dst] error:&err];
+        BOOL ok = [fm copyItemAtURL:src toURL:[NSURL fileURLWithPath:tmp] error:&err];
         if (scoped) [src stopAccessingSecurityScopedResource];
         // the scan-bypass video in some releases is huge and unused
-        for (NSString *rel in [fm enumeratorAtPath:dst])
-            if ([rel.pathExtension caseInsensitiveCompare:@"mp4"] == NSOrderedSame)
-                [fm removeItemAtPath:[dst stringByAppendingPathComponent:rel] error:nil];
+        if (ok)
+            for (NSString *rel in [fm enumeratorAtPath:tmp])
+                if ([rel.pathExtension caseInsensitiveCompare:@"mp4"] == NSOrderedSame)
+                    [fm removeItemAtPath:[tmp stringByAppendingPathComponent:rel] error:nil];
+        if (ok) {
+            [fm removeItemAtPath:dst error:nil];
+            ok = [fm moveItemAtPath:tmp toPath:dst error:&err];
+        }
+        if (!ok) [fm removeItemAtPath:tmp error:nil];
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!ok) [self showMessage:[NSString stringWithFormat:@"복사 실패: %@", err.localizedDescription] import:YES];
             else [self startOrAsk];
@@ -2561,6 +2592,10 @@ static NSValue *val(CGRect r) { return [NSValue valueWithCGRect:r]; }
     [_window makeKeyAndVisible];
     [UIApplication sharedApplication].idleTimerDisabled = YES;
     return YES;
+}
+// on record before iOS ends the app for memory: how much was left at each warning (README section 10 diagnostics)
+- (void)applicationDidReceiveMemoryWarning:(UIApplication *)app {
+    plat_log("MEMORY warning: %llu MB still available to the app", (unsigned long long)(os_proc_available_memory() >> 20));
 }
 @end
 

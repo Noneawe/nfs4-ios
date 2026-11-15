@@ -40,6 +40,9 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         GCSupportsControllerUserInteraction: true
+        # iOS 18 Game Mode (less background activity, faster controller and AirPods links) turns on for games
+        LSApplicationCategoryType: public.app-category.games
+        GCSupportsGameMode: true
         GCSupportedGameControllers:
           - ProfileName: ExtendedGamepad
     settings:
