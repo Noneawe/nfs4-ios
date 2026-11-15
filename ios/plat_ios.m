@@ -364,6 +364,40 @@ static void start_audio(void) {
     AudioUnitSetProperty(unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb);
     AudioUnitInitialize(unit);
     AudioOutputUnitStart(unit);
+    // An interruption (call, Siri, alarm) stops the unit: start it again once the session is ours, and when
+    // the app comes back to the front (an interruption that ended in the background sends no "ended").
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    void (^restart)(const char *) = ^(const char *why) {
+        NSError *err = nil;
+        [[AVAudioSession sharedInstance] setActive:YES error:&err];
+        OSStatus st = AudioOutputUnitStart(unit);
+        plat_log("audio: output restarted (%s), status %d%s%s", why, (int)st, err ? ", session: " : "",
+                 err ? err.localizedDescription.UTF8String : "");
+    };
+    __block BOOL interrupted = NO;             // the unit is stopped and not yet started again
+    [nc addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        NSUInteger type = [n.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+        plat_log("audio: interruption %s", type == AVAudioSessionInterruptionTypeBegan ? "began" : "ended");
+        if (type == AVAudioSessionInterruptionTypeBegan) interrupted = YES;
+        else if (g_app_active) { interrupted = NO; restart("interruption ended"); }
+    }];
+    [nc addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        if (interrupted) { interrupted = NO; restart("app active"); }
+    }];
+}
+
+// Heat and frame pacing on record (README section 10): once a minute for the first 15 minutes of play, then
+// every 5. The frame times themselves are in the "glide: ... frames" lines (hle_glide.c, every 300 frames).
+static void start_thermal_log(void) {
+    __block int minutes = 0;
+    [NSTimer scheduledTimerWithTimeInterval:60 repeats:YES block:^(NSTimer *t) {
+        if (!game_running_now()) return;       // paused or in the background: not play time
+        minutes++;
+        if (minutes > 15 && minutes % 5) return;
+        NSProcessInfo *p = NSProcessInfo.processInfo;
+        plat_log("thermal: %d min of play, state %ld, low power %d, cap %d fps, %s", minutes, (long)p.thermalState,
+                 (int)p.lowPowerModeEnabled, plat_frame_cap(), hle_glide_in_menu() ? "menu" : "race");
+    }];
 }
 
 // ---------------------------------------------------------------- input helpers
@@ -1281,12 +1315,65 @@ static NSString *app_version(void) {
     if (g_game_running) set_ui_pause([self wantsPause]);
 }
 
+// ---- hardware keyboard (README section 10): the keys go to the game as they are, by their place on the
+// keyboard (HID usage -> DirectInput scan code), so the game's own key table applies: arrows steer and
+// accelerate/brake, Space handbrake, A/Z gears, C camera, B look behind, H horn, R reset, Esc, Tab, Enter.
+static uint8_t hid_scan(long usage) {
+    static const uint8_t letters[26] = { 0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+                                         0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C };   // A..Z
+    if (usage >= 0x04 && usage <= 0x1D) return letters[usage - 0x04];
+    if (usage >= 0x1E && usage <= 0x27) return (uint8_t)(0x02 + (usage - 0x1E));   // 1..9, 0
+    if (usage >= 0x3A && usage <= 0x43) return (uint8_t)(0x3B + (usage - 0x3A));   // F1..F10
+    switch (usage) {
+        case 0x28: return 0x1C;   // Enter
+        case 0x29: return 0x01;   // Esc
+        case 0x2A: return 0x0E;   // Backspace
+        case 0x2B: return 0x0F;   // Tab
+        case 0x2C: return 0x39;   // Space
+        case 0x2D: return 0x0C;   // -
+        case 0x36: return 0x33;   // ,
+        case 0x37: return 0x34;   // .
+        case 0x4F: return 0xCD;   // right
+        case 0x50: return 0xCB;   // left
+        case 0x51: return 0xD0;   // down
+        case 0x52: return 0xC8;   // up
+        case 0xE0: return 0x1D;   // left Ctrl
+        case 0xE1: return 0x2A;   // left Shift
+        case 0xE2: return 0x38;   // left Alt
+        case 0xE5: return 0x36;   // right Shift
+        default: return 0;
+    }
+}
+- (BOOL)canBecomeFirstResponder { return YES; }
+- (BOOL)keyPresses:(NSSet<UIPress *> *)presses down:(BOOL)down {
+    BOOL used = NO;
+    for (UIPress *p in presses) {
+        uint8_t sc = p.key ? hid_scan((long)p.key.keyCode) : 0;
+        if (!sc || !g_game_running) continue;
+        // a window is open: it has the keyboard; a key already held is still let go
+        if (down && [self wantsPause]) continue;
+        key(sc, down);
+        used = YES;
+    }
+    return used;
+}
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if (![self keyPresses:presses down:YES]) [super pressesBegan:presses withEvent:event];
+}
+- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if (![self keyPresses:presses down:NO]) [super pressesEnded:presses withEvent:event];
+}
+- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    if (![self keyPresses:presses down:NO]) [super pressesCancelled:presses withEvent:event];
+}
+
 - (void)showHelp {
     UIAlertController *a = [UIAlertController alertControllerWithTitle:@"도움말"
         message:@"• 화면비 와이드: 레이스 최대 16:9, 메뉴는 4:3. 화면비·안티에일리어싱은 다음 실행부터 적용됩니다.\n"
                 "• 발열·저전력 모드에서는 프레임을 자동으로 낮추고, 식은 뒤 고른 설정으로 돌아갑니다.\n"
                 "• 설정·창·버튼 편집이 열려 있거나 앱을 벗어나 있는 동안 게임은 멈춥니다.\n"
                 "• 세이브 공유: 파일 앱 폴더(iCloud Drive 등)나 PC로 다른 기기와 세이브를 맞춥니다. 게임 시작 전과 앱을 벗어날 때 맞춥니다.\n"
+                "• 키보드(아이패드): 방향키 조향·가속·브레이크, Space 핸드브레이크, A/Z 기어, C 시점, B 후방, H 경적, R 리셋, Esc, Tab 지도, Enter.\n"
                 "• 문제가 생기면 'PC로 진단 보내기'를 누르세요. 튕긴 다음 실행에서 PC가 보이면 기록을 자동으로 보냅니다.\n"
                 "• 기록 위치: 파일 앱 › LiveContainer › Games › NFS4 › save 의 nfs4host.log"
         preferredStyle:UIAlertControllerStyleAlert];
@@ -1932,6 +2019,8 @@ static BOOL append_file(NSString *from, NSString *to) {
     [self buildControls];
     [self setupGamepads];
     start_audio();
+    start_thermal_log();
+    [self becomeFirstResponder];               // a hardware keyboard's keys come here (pressesBegan)
     if (!g_game_running) plat_thread_start(game_main, NULL);
     // leaving the app: new saves go up (nothing is written here while the game runs)
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification object:nil
@@ -2143,6 +2232,8 @@ static NSValue *val(CGRect r) { return [NSValue valueWithCGRect:r]; }
     // also lets the game go on once no window is over it any more (updatePause)
     [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *t) {
         [self updatePause];
+        // a closed window may leave nobody with the keyboard: take it back for the hardware keys
+        if (![self wantsPause] && !self.isFirstResponder && !self.pcField.isFirstResponder) [self becomeFirstResponder];
         BOOL m = hle_glide_in_menu() != 0;
         if (m == self.menuMode) return;
         self.menuMode = m;
