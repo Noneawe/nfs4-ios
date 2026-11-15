@@ -1,4 +1,4 @@
-# Publish only NFS4's current IPA; retain immutable local and shared history.
+﻿# Publish only NFS4's current IPA; retain immutable local and shared history.
 param(
     [string]$Target = (Join-Path $env:USERPROFILE 'iCloudDrive\iOS 포트 IPA'),
     [string]$ArchiveRoot = 'E:\ios-ports\ipa',

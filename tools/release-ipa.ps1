@@ -1,4 +1,4 @@
-# Downloads an owner-encrypted CI artifact and creates a local installable IPA.
+﻿# Downloads an owner-encrypted CI artifact and creates a local installable IPA.
 # Keeps immutable package history and synchronizes only the latest NFS4 IPA to iCloud.
 param(
     [string]$Repo = 'avoseed/nfs4-ios',
