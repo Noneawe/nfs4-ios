@@ -2,9 +2,12 @@
 # E:\rtk5-ios\art\redraw\README.md). Nothing in the game folder is changed.
 #   py -3 tools/redraw_export.py [--root D:/upscale/NFS4] [--tracks game/data/TRACKS] [TRACK ...]
 # -> <root>/input/<TRACK>/<file>_<nnn>_<name>_<w>x<h>.png and input/index.json
+#   py -3 tools/redraw_export.py [--root R] --dump <texture dump folder> NAME=KEY ...
+# -> <root>/input/UI/<NAME>_<w>x<h>.png: a texture the game builds at run time (the race HUD), see export_dump
 # The redraw work lives on D: (the drive with room; E: and F: are short of space), not in the repository.
 # A track's TR0.QFS (TRN0: night) and SKY.QFS are RefPack-compressed SHPI ("FSH") picture lists.
 import sys, struct, json, pathlib
+import numpy as np
 from PIL import Image
 
 DEFAULT_ROOT = 'D:/upscale/NFS4'
@@ -113,6 +116,28 @@ def fsh(d):
     return out
 
 
+def export_dump(dest, dump, names):
+    """Textures the game builds itself (the race HUD is one 256 px picture put together from HUD98.QFS at run time),
+    taken from a texture dump (NFS4_DUMP_TEXTURES on the test host) by key: NAME=KEY ... -> input/UI/<NAME>_<w>x<h>.png.
+    Each is sent alone on a sheet and comes back at 4x, up to 1024 px (index 'big', 'out_max'); 'soft' marks
+    see-through parts with in-between alpha (4444 glows), which the fit step enlarges smoothly instead of hard."""
+    path = dest / 'input' / 'index.json'
+    index = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+    (dest / 'input' / 'UI').mkdir(parents=True, exist_ok=True)
+    for spec in names:
+        name, key = spec.split('=')
+        d = (dump / (key + '.rgba')).read_bytes()
+        w, h = struct.unpack_from('<II', d, 4)
+        img = Image.frombytes('RGBA', (w, h), d[12:12 + 4 * w * h])
+        k = 'UI/%s_%dx%d' % (name, w, h)
+        img.save(dest / 'input' / (k + '.png'))
+        a = set(np.unique(np.asarray(img.getchannel('A'))).tolist())
+        index[k] = {'track': 'UI', 'file': 'dump', 'n': 0, 'name': name, 'code': 0, 'w': w, 'h': h,
+                    'alpha': min(a) < 255, 'soft': bool(a - {0, 255}), 'big': True, 'out_max': 1024, 'key': key}
+        print('%s: %dx%d, alpha %s' % (k, w, h, 'soft' if index[k]['soft'] else index[k]['alpha']))
+    path.write_text(json.dumps(index, indent=1), encoding='utf-8')
+
+
 def main():
     args = sys.argv[1:]
     def option(flag, default):
@@ -124,6 +149,9 @@ def main():
         return default
     dest = pathlib.Path(option('--root', DEFAULT_ROOT))
     tracks = pathlib.Path(option('--tracks', str(pathlib.Path(__file__).resolve().parents[1] / 'game' / 'data' / 'TRACKS')))
+    dump = option('--dump', None)
+    if dump:
+        return export_dump(dest, pathlib.Path(dump), args)
     want = [t.upper() for t in args]
     index = {}
     for track in sorted(p for p in tracks.iterdir() if p.is_dir()):

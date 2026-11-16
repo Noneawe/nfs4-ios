@@ -4,10 +4,10 @@
 # For every box of redraw<N>/boxes.json whose sheet is in received/:
 #   - the answer is scaled back to the sheet's canvas (models answer at their own size, e.g. 1254 for 1024),
 #   - the box is found again within a few pixels (a model moves things a little) and cut out,
-#   - scaled to the output size: 4x, at most 256 px a side (the size Voodoo-era games keep),
+#   - scaled to the output size: 4x, at most 256 px a side (the size Voodoo-era games keep; the HUD, 'out_max', 1024),
 #   - the broad colour is taken from the original (a model drifts in brightness), the detail from the answer,
-#   - the see-through shape comes from the original's alpha (hard edged, as the game's 1-bit alpha), and any
-#     magenta the model left inside it is replaced by the enlarged original,
+#   - the see-through shape comes from the original's alpha (hard edged, as the game's 1-bit alpha; enlarged smoothly
+#     for a 'soft' picture's 4444 glows), and any magenta the model left inside it is replaced by the enlarged original,
 #   - a thin band at each edge fades into the enlarged original taken with wrap-around, so a texture that tiles
 #     on the track still meets itself without a seam.
 # -> <root>/output/<TRACK>/<key>.png (RGBA) for the pack (tools/hd_texture_pack.py), and
@@ -104,7 +104,7 @@ def fit_one(sheet, b, orig):
     d0 = float(np.abs(reg_l[r:r + h, r:r + w] - ref)[amask].mean()) if amask.any() else 0.0
     cut = region.crop((r + dx, r + dy, r + dx + w, r + dy + h))
 
-    k = min(OUT_SCALE, OUT_MAX / max(orig.size))
+    k = min(OUT_SCALE, b.get('out_max', OUT_MAX) / max(orig.size))
     size = (round(orig.width * k), round(orig.height * k))
     out = np.asarray(cut.resize(size, Image.LANCZOS), np.float32)
     big = wrap_enlarge(orig.convert('RGB'), size)
@@ -127,13 +127,21 @@ def fit_one(sheet, b, orig):
     keep = np.asarray(orig.getchannel('A')) >= 128
     out = out + blur_to(o, keep, size, sigma) - blur_to(small_out, keep, size, sigma)
     # edges fade into the wrapped original so a tiling texture meets itself
-    band = max(3, size[0] // 32)
+    # (not the HUD: a sheet of parts the game cuts out by coordinates, never tiled)
+    band = 0 if 'out_max' in b else max(3, size[0] // 32)
     yy, xx = np.mgrid[0:size[1], 0:size[0]]
     edge = np.minimum(np.minimum(xx, size[0] - 1 - xx), np.minimum(yy, size[1] - 1 - yy)).astype(np.float32)
-    t = np.clip((edge + 0.5) / band, 0, 1)[..., None]
+    t = np.clip((edge + 0.5) / band, 0, 1)[..., None] if band else 1
     out = out * t + big * (1 - t)
     out = fill_under(np.clip(out, 0, 255), opaque)
     alpha = (opaque * 255).astype(np.uint8) if b.get('alpha') else np.full(opaque.shape, 255, np.uint8)
+    if b.get('soft'):
+        # in-between alpha (4444 glows): enlarged smoothly there; elsewhere a smooth but firm edge
+        a0 = orig.getchannel('A')
+        smooth = np.asarray(a0.resize(size, Image.BICUBIC), np.float32)
+        partial = np.asarray(a0.point(lambda v: 255 if 0 < v < 255 else 0).filter(ImageFilter.MaxFilter(3)).resize(size, Image.NEAREST)) > 0
+        firm = np.clip((smooth - 128) * 3 + 128, 0, 255)
+        alpha = np.clip(np.where(partial, smooth, firm) + .5, 0, 255).astype(np.uint8)
     res = Image.fromarray(np.dstack([np.clip(out + .5, 0, 255).astype(np.uint8), alpha]), 'RGBA')
     flat = (np.asarray(orig.getchannel('A')) < 128)
     return res, {'shift': [dx, dy], 'diff': round(d, 1), 'diff_unshifted': round(d0, 1),

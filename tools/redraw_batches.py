@@ -1,5 +1,6 @@
 # A redraw bundle for an image model, laid out like the other ports' (E:\rtk5-upscale\redrawN):
 #   py -3 tools/redraw_batches.py [--root D:/upscale/NFS4] <N> <TRACK> [TRACK ...] [--sky]
+#   py -3 tools/redraw_batches.py <N> UI     the HUD (redraw_export.py --dump): one picture a sheet, its own prompt
 # -> <root>/redrawN: send/<sheet>.png, todo.txt, boxes.json, 프롬프트.md (answers go to received/)
 # The redraw work lives on D: (the drive with room; E: and F: are short of space), not in the repository.
 # Track textures are 32..128 px squares: nine to a 1024x1024 sheet, each enlarged into a 256 px box on flat grey,
@@ -9,6 +10,35 @@ import sys, json, hashlib, pathlib
 from PIL import Image
 
 CANVAS, BOX, GAP, GREY, KEY = 1024, 256, 64, (128, 128, 128), (255, 0, 255)
+
+TRACK_WHAT = '''- 모든 입력은 "모음 그림"이다. 3D 레이싱 게임의 벽·바닥·건물·표지판·나무에 입히는 작은 텍스처(재질 그림) 최대 9장을, 회색 바탕 위에 3x3으로 간격을 두고 늘어놓았다. 하나의 장면이 아니다.'''
+
+TRACK_INSTRUCTIONS = '''첨부한 그림은 1999년 PC 3D 레이싱 게임(니드 포 스피드 4)의 텍스처(벽, 도로, 풀밭, 지붕, 창문, 표지판, 울타리, 나무 등에 입히는 재질 그림)를 확대해서 회색 바탕에 3x3으로 늘어놓은 것이다. 각 칸의 그림은 가로세로 64픽셀쯤의 아주 작은 원본을 확대한 것이라 흐릿하다. 각 칸을 원작 그대로 다시 그려서, 같은 텍스처의 선명한 고해상도판을 만들어 줘.
+1. 칸마다 따로따로, 제자리에서, 그 칸 크기 그대로 다시 그린다. 칸끼리 이어 그리거나, 섞거나, 배치를 바꾸거나, 크기를 바꾸지 않는다. 칸 사이와 둘레의 회색은 단색 회색 그대로 둔다. 빈 칸은 회색 그대로 둔다.
+2. 구도를 그대로 둔다. 칸 안의 선, 무늬, 벽돌·판자·창틀의 줄 수와 위치, 글자와 화살표의 위치와 크기가 원본과 정확히 겹쳐야 한다. 확대·축소·이동·회전·뒤집기를 하지 않는다.
+3. 내용을 그대로 둔다. 새로운 물건·장식·무늬를 더하지 않고, 있는 것을 빼지 않는다. 사람, 자동차, 하늘, 풍경을 그려 넣지 않는다.
+4. 색과 빛을 그대로 둔다. 색감, 밝기, 채도, 명암을 원본과 같게 한다. 더 밝게, 더 진하게, 더 화사하게 만들지 않는다. 칸 전체의 평균 밝기와 색이 원본과 같아야 한다(게임 안에서 옆 텍스처와 이어 붙기 때문이다).
+5. 화풍은 사진을 바탕으로 한 사실적인 재질 그림이다. 벽돌은 벽돌, 나무판자는 나뭇결, 아스팔트는 아스팔트 알갱이, 풀은 풀잎, 돌은 돌 표면으로, 실제 재질의 자잘한 결을 또렷하게 살린다. 만화풍·수채화풍·매끈한 플라스틱 느낌으로 바꾸지 않는다.
+6. 이 그림들은 타일처럼 반복해서 붙이거나 옆 그림과 맞대어 쓴다. 그러므로 각 칸의 네 가장자리는 원본과 같은 색과 무늬로 끝나야 한다. 가장자리에 테두리, 액자, 그림자, 둥근 모서리, 어두워지는 효과(비네팅), 여백을 넣지 않는다. 칸의 가장자리 끝까지 그림을 채운다.
+7. 순수한 자홍색(마젠타, #FF00FF) 부분은 게임에서 투명하게 뚫리는 자리다. 넓은 자홍색 자리는 자홍색 그대로 둔다. 그림과 자홍색의 경계에서는 그림의 색을 경계까지 꽉 채우고, 자홍색 쪽으로 한두 픽셀 넘어가도 괜찮다. 그림 색과 자홍색을 섞은 분홍·보라색 테두리(부드러운 경계)는 만들지 않는다. 경계의 정확한 모양은 내가 원본으로 다시 맞추므로 신경 쓰지 않아도 된다.
+8. 글자와 숫자, 화살표(표지판, 간판)는 같은 글자, 같은 위치와 크기, 같은 색으로, 윤곽이 매끈한 곡선과 직선이 되게 또렷하게만 한다. 도트나 계단 모양이 남으면 안 된다. 글자를 바꾸거나 지어내지 않는다. 좌우가 뒤집힌 글자(거울상)는 뒤집힌 그대로 둔다. 일부러 넣은 것이다. 읽을 수 없게 뭉개진 작은 글자는 지어내지 말고 뭉개진 채로 선명하게만 한다.
+9. 결과는 첨부한 그림과 같은 비율, 같은 크기로 만든다. 서명, 워터마크, 원본에 없는 글자를 넣지 않는다.
+
+'''
+
+UI_WHAT = '''- 모든 입력은 레이싱 게임 화면에 겹쳐 보이는 계기판·아이콘 그림(HUD) 한 장을 회색 바탕 가운데에 크게 놓은 것이다. 여러 부품(속도계, 회전계, 화살표, 버튼, 로고)을 한 장에 빽빽하게 모아 둔 "부품 판"이고, 하나의 장면이 아니다.'''
+
+UI_INSTRUCTIONS = '''첨부한 그림은 1999년 PC 3D 레이싱 게임(니드 포 스피드 4)의 화면 표시(HUD) 부품 판이다. 속도계·회전계 눈금판, 바늘 자리, 숫자, 화살표, 버튼, 막대, 로고 같은 부품을 한 장에 빽빽하게 모아 둔 것이고, 가로세로 256픽셀의 작은 원본을 확대한 것이라 흐릿하고 계단 모양이 보인다. 원작 그대로 다시 그려서, 같은 부품 판의 선명한 고해상도판을 만들어 줘.
+1. 부품의 위치, 크기, 모양을 원본과 정확히 겹치게 그대로 둔다. 부품을 옮기거나, 키우거나, 줄이거나, 돌리거나, 합치거나, 새로 배치하지 않는다. 부품 사이의 빈 곳과 회색 바탕은 그대로 둔다. 게임은 이 판에서 좌표로 부품을 잘라 쓰므로 한 픽셀만 밀려도 화면이 깨진다.
+2. 내용을 그대로 둔다. 부품을 더하거나 빼지 않는다. 숫자(0, 50, 100, 150 … 250, 1~9, 80, 160, 240, 320, 400 등)와 글자(NFS, kph, mph)는 같은 글자, 같은 자리, 같은 크기, 같은 색으로만 다시 쓴다. 숫자를 바꾸거나 지어내지 않는다.
+3. 눈금은 같은 개수, 같은 각도, 같은 길이로 둔다. 원은 매끈한 원으로, 직선은 곧은 직선으로, 글자와 숫자와 화살표는 윤곽이 매끈한 벡터 그림처럼 또렷하게 그린다. 도트, 계단 모양 윤곽, 뭉개진 얼룩이 남으면 안 된다.
+4. 색과 빛을 그대로 둔다. 각 부품의 색, 밝기, 그러데이션, 광택을 원본과 같게 한다. 더 화사하게, 더 진하게 만들지 않는다. 새로운 그림자, 테두리, 질감, 반사를 더하지 않는다.
+5. 화풍은 원본 그대로 깔끔한 게임 그래픽(평평한 색과 단순한 그러데이션)이다. 사진처럼 바꾸거나, 입체감을 더하거나, 금속 질감을 넣지 않는다.
+6. 순수한 자홍색(마젠타, #FF00FF) 부분은 게임에서 투명하게 뚫리는 자리다. 자홍색 자리는 자홍색 그대로 둔다. 부품과 자홍색의 경계에서는 부품의 색(검은 윤곽선 등)을 경계까지 꽉 채우고, 부품 색과 자홍색을 섞은 분홍·보라색 테두리는 만들지 않는다. 경계의 정확한 모양은 내가 원본으로 다시 맞추므로 신경 쓰지 않아도 된다.
+7. 부품 판의 바깥 네 가장자리에 테두리, 그림자, 어두워짐을 넣지 않는다. 판 밖의 회색은 단색 회색 그대로 둔다.
+8. 결과는 첨부한 그림과 같은 비율, 같은 크기로 만든다. 서명, 워터마크, 원본에 없는 글자를 넣지 않는다.
+
+'''
 
 PROMPT = '''# NFS4 리드로잉: redraw{n}
 
@@ -22,7 +52,7 @@ PROMPT = '''# NFS4 리드로잉: redraw{n}
 - 출력: received\\<이름>.png  (입력과 같은 이름)
 - 기록: log.md
 - 이미 received\\ 에 있는 이름은 건너뛴다.
-- 모든 입력은 "모음 그림"이다. 3D 레이싱 게임의 벽·바닥·건물·표지판·나무에 입히는 작은 텍스처(재질 그림) 최대 9장을, 회색 바탕 위에 3x3으로 간격을 두고 늘어놓았다. 하나의 장면이 아니다.
+{what}
 
 [모델과 설정]
 - 이미지는 지금 쓸 수 있는 것 가운데 가장 최신이고 가장 품질이 좋은 이미지 모델로 만든다.
@@ -54,18 +84,7 @@ PROMPT = '''# NFS4 리드로잉: redraw{n}
 - 칸 가장자리에 테두리·액자·그림자·어두워짐이 생기면 실패다.
 
 [지시문]
-첨부한 그림은 1999년 PC 3D 레이싱 게임(니드 포 스피드 4)의 텍스처(벽, 도로, 풀밭, 지붕, 창문, 표지판, 울타리, 나무 등에 입히는 재질 그림)를 확대해서 회색 바탕에 3x3으로 늘어놓은 것이다. 각 칸의 그림은 가로세로 64픽셀쯤의 아주 작은 원본을 확대한 것이라 흐릿하다. 각 칸을 원작 그대로 다시 그려서, 같은 텍스처의 선명한 고해상도판을 만들어 줘.
-1. 칸마다 따로따로, 제자리에서, 그 칸 크기 그대로 다시 그린다. 칸끼리 이어 그리거나, 섞거나, 배치를 바꾸거나, 크기를 바꾸지 않는다. 칸 사이와 둘레의 회색은 단색 회색 그대로 둔다. 빈 칸은 회색 그대로 둔다.
-2. 구도를 그대로 둔다. 칸 안의 선, 무늬, 벽돌·판자·창틀의 줄 수와 위치, 글자와 화살표의 위치와 크기가 원본과 정확히 겹쳐야 한다. 확대·축소·이동·회전·뒤집기를 하지 않는다.
-3. 내용을 그대로 둔다. 새로운 물건·장식·무늬를 더하지 않고, 있는 것을 빼지 않는다. 사람, 자동차, 하늘, 풍경을 그려 넣지 않는다.
-4. 색과 빛을 그대로 둔다. 색감, 밝기, 채도, 명암을 원본과 같게 한다. 더 밝게, 더 진하게, 더 화사하게 만들지 않는다. 칸 전체의 평균 밝기와 색이 원본과 같아야 한다(게임 안에서 옆 텍스처와 이어 붙기 때문이다).
-5. 화풍은 사진을 바탕으로 한 사실적인 재질 그림이다. 벽돌은 벽돌, 나무판자는 나뭇결, 아스팔트는 아스팔트 알갱이, 풀은 풀잎, 돌은 돌 표면으로, 실제 재질의 자잘한 결을 또렷하게 살린다. 만화풍·수채화풍·매끈한 플라스틱 느낌으로 바꾸지 않는다.
-6. 이 그림들은 타일처럼 반복해서 붙이거나 옆 그림과 맞대어 쓴다. 그러므로 각 칸의 네 가장자리는 원본과 같은 색과 무늬로 끝나야 한다. 가장자리에 테두리, 액자, 그림자, 둥근 모서리, 어두워지는 효과(비네팅), 여백을 넣지 않는다. 칸의 가장자리 끝까지 그림을 채운다.
-7. 순수한 자홍색(마젠타, #FF00FF) 부분은 게임에서 투명하게 뚫리는 자리다. 넓은 자홍색 자리는 자홍색 그대로 둔다. 그림과 자홍색의 경계에서는 그림의 색을 경계까지 꽉 채우고, 자홍색 쪽으로 한두 픽셀 넘어가도 괜찮다. 그림 색과 자홍색을 섞은 분홍·보라색 테두리(부드러운 경계)는 만들지 않는다. 경계의 정확한 모양은 내가 원본으로 다시 맞추므로 신경 쓰지 않아도 된다.
-8. 글자와 숫자, 화살표(표지판, 간판)는 같은 글자, 같은 위치와 크기, 같은 색으로, 윤곽이 매끈한 곡선과 직선이 되게 또렷하게만 한다. 도트나 계단 모양이 남으면 안 된다. 글자를 바꾸거나 지어내지 않는다. 좌우가 뒤집힌 글자(거울상)는 뒤집힌 그대로 둔다. 일부러 넣은 것이다. 읽을 수 없게 뭉개진 작은 글자는 지어내지 말고 뭉개진 채로 선명하게만 한다.
-9. 결과는 첨부한 그림과 같은 비율, 같은 크기로 만든다. 서명, 워터마크, 원본에 없는 글자를 넣지 않는다.
-
-[하지 말 것]
+{instructions}[하지 말 것]
 - 이미지 모델 대신 파이썬·포토샵류 필터(샤픈, 업스케일러, 리사이즈, 색 줄이기, 흐리기)로 처리하기.
 - 빨리 끝내려고 대충 처리하거나, 검사 없이 저장하기.
 - send\\, todo.txt, boxes.json, 프롬프트.md 를 고치거나 지우거나 옮기기.
@@ -104,7 +123,7 @@ def main():
         if bp.exists():
             for key, b in json.loads(bp.read_text(encoding='utf-8')).items():
                 seen[b['hash']] = None
-    todo, boxes, cells = [], {}, []
+    todo, boxes, cells, big = [], {}, [], []
     for key in sorted(index):
         e = index[key]
         if e['track'] not in tracks or min(e['w'], e['h']) < 32:
@@ -119,16 +138,21 @@ def main():
             continue
         seen[h] = key
         boxes[key] = {'hash': h, 'w': e['w'], 'h': e['h'], 'alpha': e['alpha'], 'same': []}
-        cells.append((key, img))
+        for extra in ('soft', 'out_max'):          # UI pictures (redraw_export.py --dump)
+            if extra in e:
+                boxes[key][extra] = e[extra]
+        (big if e.get('big') else cells).append((key, img))
 
-    for s in range(0, len(cells), 9):
-        name = 't_sheet_%s_s%02d' % ('SKY' if sky else tracks[0], s // 9)
+    # a big picture (the HUD) alone on its sheet, as large as the gap round it allows; the rest nine to a sheet
+    groups = [('t_sheet_%s_s%02d' % ('SKY' if sky else tracks[0], s // 9), cells[s:s + 9], BOX, 3) for s in range(0, len(cells), 9)]
+    groups += [('t_sheet_UI_%s' % key.split('/')[-1], [(key, img)], CANVAS - 2 * GAP, 1) for key, img in big]
+    for name, group, box, per in groups:
         sheet = Image.new('RGB', (CANVAS, CANVAS), GREY)
-        for i, (key, img) in enumerate(cells[s:s + 9]):
-            k = BOX / max(img.size)
+        for i, (key, img) in enumerate(group):
+            k = box / max(img.size)
             w, h = round(img.width * k), round(img.height * k)
-            x = GAP + (i % 3) * (BOX + GAP) + (BOX - w) // 2
-            y = GAP + (i // 3) * (BOX + GAP) + (BOX - h) // 2
+            x = GAP + (i % per) * (box + GAP) + (box - w) // 2
+            y = GAP + (i // per) * (box + GAP) + (box - h) // 2
             # colour enlarged smoothly; the see-through shape stays hard-edged and flat magenta
             rgb = img.convert('RGB').resize((w, h), Image.BICUBIC)
             mask = img.getchannel('A').resize((w, h), Image.NEAREST).point(lambda a: 255 if a >= 128 else 0)
@@ -140,8 +164,9 @@ def main():
         todo.append(name)
     (out / 'todo.txt').write_text('\n'.join(todo) + '\n', encoding='utf-8')
     (out / 'boxes.json').write_text(json.dumps(boxes, indent=1), encoding='utf-8')
-    (out / '프롬프트.md').write_text(PROMPT.format(n=n, folder=str(out), count=len(todo)), encoding='utf-8')
-    print('%s: %d sheets, %d pictures (%d more share one)' % (out, len(todo), len(cells), sum(len(b['same']) for b in boxes.values())))
+    (out / '프롬프트.md').write_text(PROMPT.format(n=n, folder=str(out), count=len(todo),
+        what=UI_WHAT if big and not cells else TRACK_WHAT, instructions=UI_INSTRUCTIONS if big and not cells else TRACK_INSTRUCTIONS), encoding='utf-8')
+    print('%s: %d sheets, %d pictures (%d more share one)' % (out, len(todo), len(cells) + len(big), sum(len(b['same']) for b in boxes.values())))
 
 
 if __name__ == '__main__':

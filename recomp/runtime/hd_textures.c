@@ -71,7 +71,8 @@ int hle_glide_in_menu(void);
 
 static void dump(uint64_t key, const uint32_t *px, int w, int h) {
     const char *dir = getenv("NFS4_DUMP_TEXTURES");
-    if (!dir || hle_glide_in_menu()) return;      /* races only: the menus stream thousands of movie tiles */
+    /* races only (the menus stream thousands of movie tiles), unless NFS4_DUMP_MENUS is set too */
+    if (!dir || (hle_glide_in_menu() && !getenv("NFS4_DUMP_MENUS"))) return;
     char path[1200];
     snprintf(path, sizeof path, "%s/%016llx.rgba", dir, (unsigned long long)key);
     FILE *f = fopen(path, "rb");
