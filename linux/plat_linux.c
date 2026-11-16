@@ -4,6 +4,7 @@
 #include "gpu.h"
 #include "gpu_gles.h"
 #include "input_sdl.h"
+#include "input_touch.h"
 #include "rt_host.h"
 #include <SDL.h>
 #include <dirent.h>
@@ -42,7 +43,18 @@ static int frame_width, frame_height, frame_pending;
 void hle_key_event(uint8_t code, int down);
 void hle_audio_mix(float *out, int frames, int rate);
 
+static int fullscreen_wanted(void) {
+#ifdef __ANDROID__
+    return 1;
+#else
+    return getenv("NFS4_FULLSCREEN") != NULL;
+#endif
+}
 static void log_message(const char *format, va_list args) {
+#ifdef __ANDROID__
+    SDL_LogMessageV(SDL_LOG_CATEGORY_APPLICATION, SDL_LOG_PRIORITY_INFO, format, args);
+    return;
+#endif
     flockfile(stderr);
     vfprintf(stderr, format, args);
     fputc('\n', stderr);
@@ -183,6 +195,9 @@ void plat_local_time(uint16_t out[8]) {
 /* NFS4_WIDE=<w/h> (np. 1.7778) lub "auto" (proporcje pulpitu); brak = 4:3. Wyścig rysowany do 16:9. */
 float plat_wide_aspect(void) {
     const char *e = getenv("NFS4_WIDE");
+#ifdef __ANDROID__
+    if (!e) e = "auto";
+#endif
     if (!e) return 0;
     if (strcmp(e, "auto")) return (float)atof(e);
     SDL_DisplayMode m;
@@ -221,7 +236,8 @@ static const uint8_t key_codes[SDL_NUM_SCANCODES] = {
     [SDL_SCANCODE_RCTRL]=0x9D, [SDL_SCANCODE_RALT]=0xB8, [SDL_SCANCODE_HOME]=0xC7,
     [SDL_SCANCODE_UP]=0xC8, [SDL_SCANCODE_PAGEUP]=0xC9, [SDL_SCANCODE_LEFT]=0xCB,
     [SDL_SCANCODE_RIGHT]=0xCD, [SDL_SCANCODE_END]=0xCF, [SDL_SCANCODE_DOWN]=0xD0,
-    [SDL_SCANCODE_PAGEDOWN]=0xD1, [SDL_SCANCODE_DELETE]=0xD3
+    [SDL_SCANCODE_PAGEDOWN]=0xD1, [SDL_SCANCODE_DELETE]=0xD3,
+    [SDL_SCANCODE_AC_BACK]=0x01
 };
 int plat_pump(void) {
     SDL_Event event;
@@ -240,6 +256,11 @@ int plat_pump(void) {
             }
             break;
         }
+        case SDL_FINGERDOWN:
+        case SDL_FINGERMOTION:
+        case SDL_FINGERUP:
+            touch_event(&event);
+            break;
         case SDL_MOUSEMOTION:
             plat_mouse_dx += event.motion.xrel;
             plat_mouse_dy += event.motion.yrel;
@@ -285,7 +306,7 @@ static void show_frame(const uint32_t *rgba, int w, int h) {
             plat_fatal("SDL tekstura: %s", SDL_GetError());
         width = w;
         height = h;
-        if (!getenv("NFS4_FULLSCREEN")) {
+        if (!fullscreen_wanted()) {
             SDL_SetWindowSize(window, w, h);
             SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
         }
@@ -294,6 +315,7 @@ static void show_frame(const uint32_t *rgba, int w, int h) {
         SDL_RenderClear(renderer) < 0 ||
         SDL_RenderCopy(renderer, texture, NULL, NULL) < 0)
         plat_fatal("SDL klatka: %s", SDL_GetError());
+    touch_draw(renderer, hle_glide_in_menu());
     SDL_RenderPresent(renderer);
 }
 static void show_pending_frame(void) {
@@ -314,12 +336,14 @@ static void init_sdl(void) {
         plat_fatal("SDL: %s", SDL_GetError());
     window = SDL_CreateWindow("NFS 4 - Linux", SDL_WINDOWPOS_CENTERED,
                              SDL_WINDOWPOS_CENTERED, 640, 480,
-                             getenv("NFS4_FULLSCREEN") ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                             fullscreen_wanted() ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
     if (!window) plat_fatal("SDL okno: %s", SDL_GetError());
     renderer = SDL_CreateRenderer(window, -1, 0);
     if (!renderer) plat_fatal("SDL renderer: %s", SDL_GetError());
     frame_lock = SDL_CreateMutex();
     if (!frame_lock) plat_fatal("SDL mutex klatki: %s", SDL_GetError());
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");   /* dotyk obsługuje input_touch.c */
+    SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
     linux_input_init();
     plat_log("SDL video: %s; platforma: %s", SDL_GetCurrentVideoDriver(), SDL_GetPlatform());
 }
@@ -418,6 +442,21 @@ int main(int argc, char **argv) {
         puts("NFS4 Linux: SDL self-test OK");
         return 0;
     }
+#ifdef __ANDROID__
+    /* Dane gry: /sdcard/Android/data/<pakiet>/files/{game,save}; bez uprawnień. */
+    static char android_game[PATH_MAX], android_save[PATH_MAX];
+    if (argc != 3) {
+        const char *base = SDL_AndroidGetExternalStoragePath();
+        if (!base) base = SDL_AndroidGetInternalStoragePath();
+        snprintf(android_game, sizeof android_game, "%s/game", base);
+        snprintf(android_save, sizeof android_save, "%s/save", base);
+        mkdir(android_game, 0775);
+        mkdir(android_save, 0775);
+        static char *android_argv[3];
+        android_argv[0] = argv[0]; android_argv[1] = android_game; android_argv[2] = android_save;
+        argc = 3; argv = android_argv;
+    }
+#endif
     if (argc != 3) {
         fprintf(stderr, "Użycie: %s <folder gry> <folder zapisów>\n", argv[0]);
         return 2;

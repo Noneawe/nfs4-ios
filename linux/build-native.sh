@@ -12,7 +12,7 @@ export CC="${CC:-gcc}"
 target=$("$CC" -dumpmachine)
 obj="$root/recomp/build/$target"
 mkdir -p -- "$obj" "$(dirname -- "$output")"
-src=("$root"/recomp/gen/*/*.c "$root"/recomp/runtime/*.c "$here/plat_linux.c" "$here/gpu_gles.c" "$here/input_sdl.c")
+src=("$root"/recomp/gen/*/*.c "$root"/recomp/runtime/*.c "$here/plat_linux.c" "$here/gpu_gles.c" "$here/input_sdl.c" "$here/input_touch.c")
 if [[ ! -f ${src[0]} ]]; then
     echo 'Brakuje wygenerowanego kodu C.' >&2
     exit 2

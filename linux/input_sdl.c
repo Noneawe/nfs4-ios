@@ -1,4 +1,5 @@
 #include "input_sdl.h"
+#include "input_touch.h"
 #include "plat.h"
 #include <SDL.h>
 #include <stdlib.h>
@@ -113,11 +114,12 @@ int linux_input_poll(int menu) {
         };
         for (unsigned i = 0; i < 8; ++i) if (button(buttons[i])) plat_joy_buttons |= 1u << i;
     }
+    touch_keys(next, menu);
     for (unsigned code = 0; code < 256; ++code) {
         gamepad[code] = next[code];
         update_key(code);
     }
-    plat_mouse_buttons = mouse_button || pad_mouse ? 0x80 : 0;
+    plat_mouse_buttons = mouse_button || pad_mouse || touch_click() ? 0x80 : 0;
     return !controller || !(button(SDL_CONTROLLER_BUTTON_START) && button(SDL_CONTROLLER_BUTTON_BACK));
 }
 void linux_input_cleanup(void) {
