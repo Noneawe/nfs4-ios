@@ -126,7 +126,7 @@ def main():
     todo, boxes, cells, big = [], {}, [], []
     for key in sorted(index):
         e = index[key]
-        if e['track'] not in tracks or min(e['w'], e['h']) < 32:
+        if e['track'].upper() not in tracks or min(e['w'], e['h']) < 32:
             continue
         if e['file'].upper().startswith('SKY') != sky:
             continue
@@ -144,7 +144,11 @@ def main():
         (big if e.get('big') else cells).append((key, img))
 
     # a big picture (the HUD) alone on its sheet, as large as the gap round it allows; the rest nine to a sheet
-    groups = [('t_sheet_%s_s%02d' % ('SKY' if sky else tracks[0], s // 9), cells[s:s + 9], BOX, 3) for s in range(0, len(cells), 9)]
+    # each track on sheets of its own, named after it, so one bundle can hold several tracks
+    groups = []
+    for t in tracks:
+        mine = [c for c in cells if index[c[0]]['track'].upper() == t]
+        groups += [('t_sheet_%s%s_s%02d' % ('SKY_' if sky else '', t, s // 9), mine[s:s + 9], BOX, 3) for s in range(0, len(mine), 9)]
     groups += [('t_sheet_UI_%s' % key.split('/')[-1], [(key, img)], CANVAS - 2 * GAP, 1) for key, img in big]
     for name, group, box, per in groups:
         sheet = Image.new('RGB', (CANVAS, CANVAS), GREY)
@@ -164,8 +168,11 @@ def main():
         todo.append(name)
     (out / 'todo.txt').write_text('\n'.join(todo) + '\n', encoding='utf-8')
     (out / 'boxes.json').write_text(json.dumps(boxes, indent=1), encoding='utf-8')
-    (out / '프롬프트.md').write_text(PROMPT.format(n=n, folder=str(out), count=len(todo),
-        what=UI_WHAT if big and not cells else TRACK_WHAT, instructions=UI_INSTRUCTIONS if big and not cells else TRACK_INSTRUCTIONS), encoding='utf-8')
+    text = PROMPT.format(n=n, folder=str(out), count=len(todo),
+        what=UI_WHAT if big and not cells else TRACK_WHAT, instructions=UI_INSTRUCTIONS if big and not cells else TRACK_INSTRUCTIONS)
+    if root.name.upper() == 'NFS3':     # the same tools make NFS3's track bundles (D:/upscale/NFS3, read from F:/NFS3-iOS)
+        text = text.replace('NFS4 리드로잉', 'NFS3 리드로잉').replace('1999년 PC 3D 레이싱 게임(니드 포 스피드 4)', '1998년 PC 3D 레이싱 게임(니드 포 스피드 3)')
+    (out / '프롬프트.md').write_text(text, encoding='utf-8')
     print('%s: %d sheets, %d pictures (%d more share one)' % (out, len(todo), len(cells) + len(big), sum(len(b['same']) for b in boxes.values())))
 
 

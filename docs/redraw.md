@@ -55,6 +55,15 @@
 - **효과(SFX.FSH):** 연기·불꽃·스키드 자국 13장이 레이스에서 맞지만, 원래 흐린 그림이라 넣지 않았습니다.
 - **자동차:** 레이스에서는 1024px로 올라갑니다. 이번 조사에서는 다루지 않았습니다.
 
+## 나머지 트랙 (redraw3~11, 2026-11-16)
+
+- 18개 트랙의 TR0·TRN0(밤)을 꺼내 묶었습니다. 한 묶음에 트랙 2~3개이고, 시트는 트랙마다 따로 이름이 붙습니다(`t_sheet_<트랙>_sNN`). 하늘(SKY)은 넣지 않았습니다.
+  - redraw3: HILLS·GT1·GT2 44장, redraw4: COASTAL·COUNTRY 38장, redraw5: GERMANY·ATLANTIC 56장
+  - redraw6: SNOWY·AQUATICA 38장, redraw7: FRANCE·PARK 39장, redraw8: UK·SUMMIT 35장
+  - redraw9: GT3·ROCKYPAS 31장, redraw10: EMPIRE·LOSTCANY 50장, redraw11: REDROCK 21장
+  - 모두 352장, 그림 3086개입니다. 밤 텍스처 가운데 낮과 같은 것은 한 번만 보냅니다.
+- 같은 도구로 NFS3 트랙 묶음도 만듭니다(`--root D:/upscale/NFS3`, `--tracks F:/NFS3-iOS/NFS3Data/gamedata/tracks`). 지시문의 게임 이름은 root 이름을 보고 바꿉니다. 적용 방법은 `D:\upscale\NFS3\트랙-적용.md`에 있습니다.
+
 ## 기기에서 확인할 것
 
 - 텍스처 예산은 64 MiB입니다(`hle_glide.c`). 4배 텍스처는 장당 약 350 KB라, 한 트랙을 다 바꾸면 예산을 넘어 내보내고 다시 읽기를 반복할 수 있습니다. 레이스 중 끊김과 메모리를 봐야 합니다.
