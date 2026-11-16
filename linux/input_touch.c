@@ -1,12 +1,15 @@
 /* Dotyk: w menu touchpad (przesunięcie = kursor, tap = klik), w wyścigu przyciski na ekranie. */
 #include "input_touch.h"
 #include "plat.h"
+#include <stdlib.h>
 
 #define MAX_FINGERS 10
 typedef struct { int active; SDL_FingerID id; float x, y, x0, y0; uint64_t t0; int moved; } Finger;
 static Finger fingers[MAX_FINGERS];
 static uint64_t click_until;
 static float menu_rx, menu_ry;
+static float joy_x, joy_y;      /* wyścig czyta gracza 1 z joysticka "Touch Wheel": X kierowanie, Y gaz/hamulec, przyciski A..H */
+static uint32_t joy_buttons;
 static int view_w, view_h, frame_w, frame_h;   /* okno i klatka gry (ustawiane przy rysowaniu) */   /* ułamki pikseli gry niezastosowane jeszcze do kursora */
 
 /* Przyciski we współrzędnych klatki gry 0..1 (rysowane i testowane względem obrazu, nie okna): x0, y0, x1, y1, kod skanowania gry, etykieta */
@@ -22,6 +25,7 @@ static const Button buttons[] = {
 };
 #define NBUTTONS ((int)(sizeof buttons / sizeof *buttons))
 
+static int inside(const Button *b, const Finger *f);
 static Finger *find(SDL_FingerID id) {
     for (int i = 0; i < MAX_FINGERS; ++i) if (fingers[i].active && fingers[i].id == id) return &fingers[i];
     return NULL;
@@ -67,6 +71,7 @@ static int inside(const Button *b, const Finger *f) {
     return fx >= b->x0 && fx <= b->x1 && fy >= b->y0 && fy <= b->y1;
 }
 void touch_keys(uint8_t next[256], int menu) {
+    joy_x = joy_y = 0; joy_buttons = 0;
     if (menu) {
         int dx = (int)menu_rx, dy = (int)menu_ry;
         plat_mouse_dx += dx; plat_mouse_dy += dy;
@@ -76,9 +81,17 @@ void touch_keys(uint8_t next[256], int menu) {
     menu_rx = menu_ry = 0;
     for (int i = 0; i < MAX_FINGERS; ++i) {
         if (!fingers[i].active) continue;
-        for (int b = 0; b < NBUTTONS; ++b) if (inside(&buttons[b], &fingers[i])) next[buttons[b].code] = 1;
+        for (int b = 0; b < NBUTTONS; ++b) if (inside(&buttons[b], &fingers[i])) {
+            const uint8_t code = buttons[b].code;
+            next[code] = 1;
+            if (code == 0xcb) joy_x -= 1; else if (code == 0xcd) joy_x += 1;
+            else if (code == 0xc8) joy_y -= 1; else if (code == 0xd0) joy_y += 1;   /* góra = gaz */
+            else if (code == 0x39) joy_buttons |= 1u << 0;                          /* A: hamulec ręczny */
+            else if (code == 0x2e) joy_buttons |= 1u << 1;                          /* B: kamera */
+        }
     }
 }
+void touch_joy(float *x, float *y, uint32_t *buttons) { *x = joy_x; *y = joy_y; *buttons = joy_buttons; }
 void touch_draw(SDL_Renderer *renderer, int menu) {
     SDL_GetRendererOutputSize(renderer, &view_w, &view_h);
     SDL_RenderGetLogicalSize(renderer, &frame_w, &frame_h);

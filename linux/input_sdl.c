@@ -115,6 +115,14 @@ int linux_input_poll(int menu) {
         for (unsigned i = 0; i < 8; ++i) if (button(buttons[i])) plat_joy_buttons |= 1u << i;
     }
     touch_keys(next, menu);
+    {
+        float tx, ty; uint32_t tb;
+        touch_joy(&tx, &ty, &tb);
+        float jx = plat_joy_x + tx, jy = plat_joy_y + ty;
+        plat_joy_x = jx < -1 ? -1 : jx > 1 ? 1 : jx;
+        plat_joy_y = jy < -1 ? -1 : jy > 1 ? 1 : jy;
+        plat_joy_buttons |= tb;
+    }
     for (unsigned code = 0; code < 256; ++code) {
         gamepad[code] = next[code];
         update_key(code);
