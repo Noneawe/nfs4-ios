@@ -12,6 +12,9 @@ adb shell chmod -R a+rwX $P/game      # pliki wgrane przez adb są własnością
 adb shell am start -n io.github.noneawe.nfs4/org.libsdl.app.SDLActivity
 ```
 
+Ikona aplikacji jest wyciągana z zasobów `work/game/nfs4.exe` (`android/extract_ico.py`, jak ikona w Windows) podczas budowania;
+bez tego pliku APK dostaje domyślną ikonę Androida. Ikony nie ma w repozytorium, bo to zasób gry (`NFS4_EXE=` wskazuje inny `nfs4.exe`).
+
 Dane gry czytane są z `/sdcard/Android/data/io.github.noneawe.nfs4/files/game`, zapisy trafiają do `.../files/save`.
 Aplikacja nie wymaga uprawnień. Dane PC (`DATA`) przygotuj tak samo jak dla Linuksa (`./setup.sh`, katalog `work/game`).
 Widescreen: na Androidzie włączony automatycznie (proporcje ekranu, do 16:9); menu zostaje w 4:3 z czarnymi pasami.
