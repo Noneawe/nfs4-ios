@@ -1,0 +1,9 @@
+Native recompilation and shared Glide runtime:
+https://github.com/avoseed/nfs4-ios
+Pinned revision: e318f058b5086d7820f6881a76f35d0dc2f03cec
+
+The pinned source archive does not contain a standalone LICENSE file.
+No additional upstream license grant is asserted by this local test package.
+
+SDL2 and the device's OpenGL ES implementation are linked dynamically and are
+provided by the build environment and firmware, not bundled in the package.

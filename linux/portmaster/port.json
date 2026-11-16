@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "name": "nfs4.zip",
+  "items": ["Need for Speed 4.sh", "nfs4"],
+  "items_opt": null,
+  "attr": {
+    "title": "Need for Speed 4: High Stakes",
+    "desc": "Experimental native ARM64 port for local R36S testing.",
+    "inst": "Copy your prepared PC game files into nfs4/game. Requires hardware validation.",
+    "genres": ["racing"],
+    "porter": ["Local build"],
+    "image": {},
+    "rtr": false,
+    "runtime": null,
+    "reqs": [],
+    "arch": ["aarch64"]
+  }
+}
