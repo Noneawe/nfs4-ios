@@ -180,7 +180,14 @@ void plat_local_time(uint16_t out[8]) {
         local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec, t.tv_nsec / 1000000};
     memcpy(out, fields, sizeof fields);
 }
-float plat_wide_aspect(void) { return 0; }
+/* NFS4_WIDE=<w/h> (np. 1.7778) lub "auto" (proporcje pulpitu); brak = 4:3. Wyścig rysowany do 16:9. */
+float plat_wide_aspect(void) {
+    const char *e = getenv("NFS4_WIDE");
+    if (!e) return 0;
+    if (strcmp(e, "auto")) return (float)atof(e);
+    SDL_DisplayMode m;
+    return SDL_GetDesktopDisplayMode(0, &m) == 0 && m.h > 0 ? (float)m.w / m.h : 0;
+}
 int plat_frame_cap(void) {
     const char *setting = getenv("NFS4_FPS");
     if (!setting) return 30;
@@ -278,6 +285,10 @@ static void show_frame(const uint32_t *rgba, int w, int h) {
             plat_fatal("SDL tekstura: %s", SDL_GetError());
         width = w;
         height = h;
+        if (!getenv("NFS4_FULLSCREEN")) {
+            SDL_SetWindowSize(window, w, h);
+            SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+        }
     }
     if (SDL_UpdateTexture(texture, NULL, rgba, w * 4) < 0 ||
         SDL_RenderClear(renderer) < 0 ||

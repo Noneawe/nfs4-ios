@@ -57,6 +57,24 @@ Pierwsza wersja backendu odczytuje gotowe klatki z GPU do SDL2. To może ogranic
 
 Poprzedni build zachowano w `work/nfs4host-software`, a jego log w `work/nfs4host-software.log`. Przebudowa przez `./setup.sh --build-only` zachowuje istniejące dane gry i zapisy.
 
+## Widescreen (16:9)
+
+Wyścig można rysować w proporcjach ekranu (do 16:9, wysokość 768 px). Menu zawsze działa w 4:3 (640×480). Tryb korzysta z obsługi szerokiego obrazu w warstwie Glide z nfs4-ios; warstwa linuksowa tylko podaje proporcje.
+
+```bash
+NFS4_WIDE=auto ./run.sh        # proporcje pulpitu
+NFS4_WIDE=1.7778 ./run.sh      # wymuszone 16:9
+```
+
+Bez `NFS4_WIDE` gra działa w 4:3, co pasuje do ekranów R36S. W oknie jego rozmiar i położenie zmieniają się razem z rozdzielczością klatki; przy `NFS4_FULLSCREEN=1` obraz jest skalowany z czarnymi pasami. W `work/nfs4host.log` szukaj `driver 960x720 descriptor` i `race display`. Sprawdzone: wyścig w 1360×768 w GLES (llvmpipe).
+
+| Menu główne | Ustawienia wyścigu |
+|---|---|
+| ![Menu główne](docs/screenshots/menu-main.png) | ![Ustawienia](docs/screenshots/menu-single-race-setup.png) |
+
+![Wyścig 16:9, start](docs/screenshots/race-wide-start.png)
+![Wyścig 16:9, jazda](docs/screenshots/race-wide-driving.png)
+
 ## ARM64 / R36S / PortMaster
 
 Działający punkt odniesienia x86‑64, źródła oraz sumy SHA‑256 są w `work/x86-reference/`.
