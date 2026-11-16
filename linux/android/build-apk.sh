@@ -10,6 +10,13 @@ w=$B/apk; rm -rf "$w"; mkdir -p "$w/classes" "$w/lib"
 javac -nowarn -source 11 -target 11 -cp "$jar" -d "$w/classes" "$sdl"/android-project/app/src/main/java/org/libsdl/app/*.java 2>&1 | grep -v -E '^(Note|warning)' || true
 "$bt/d8" --min-api 24 --lib "$jar" --output "$w" $(find "$w/classes" -name '*.class')
 # Ikona z zasobów nfs4.exe (jak w Windows); bez pliku APK dostaje domyślną ikonę Androida.
+mkdir -p "$w/res/values" "$w/res/values-v28"
+cat > "$w/res/values/styles.xml" <<'XML'
+<resources><style name="NfsTheme" parent="@android:style/Theme.NoTitleBar.Fullscreen"><item name="android:windowBackground">@android:color/black</item></style></resources>
+XML
+cat > "$w/res/values-v28/styles.xml" <<'XML'
+<resources><style name="NfsTheme" parent="@android:style/Theme.NoTitleBar.Fullscreen"><item name="android:windowBackground">@android:color/black</item><item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item></style></resources>
+XML
 exe=${NFS4_EXE:-$here/../work/game/nfs4.exe}
 manifest=$here/AndroidManifest.xml; link_res=()
 if [[ -f $exe ]] && python3 "$here/extract_ico.py" "$exe" "$w/nfs4.ico" >/dev/null; then
@@ -19,9 +26,9 @@ if [[ -f $exe ]] && python3 "$here/extract_ico.py" "$exe" "$w/nfs4.ico" >/dev/nu
         convert -size ${px}x${px} xc:'#0b1236' \( "$w/nfs4.ico[0]" -background none -filter Lanczos -resize $((px*7/10))x$((px*7/10)) \) \
             -gravity center -composite "$w/res/mipmap-${d%%:*}/ic_launcher.png"
     done
-    "$bt/aapt2" compile --dir "$w/res" -o "$w/res.zip"
-    link_res=(-R "$w/res.zip"); sed 's|android:label=|android:icon="@mipmap/ic_launcher" android:label=|' "$manifest" > "$w/AndroidManifest.xml"; manifest=$w/AndroidManifest.xml
+    sed 's|android:label=|android:icon="@mipmap/ic_launcher" android:label=|' "$manifest" > "$w/AndroidManifest.xml"; manifest=$w/AndroidManifest.xml
 fi
+"$bt/aapt2" compile --dir "$w/res" -o "$w/res.zip"; link_res=("$w/res.zip")
 "$bt/aapt2" link -I "$jar" --manifest "$manifest" "${link_res[@]}" --min-sdk-version 24 --target-sdk-version 34 -o "$w/base.apk"
 for abi in x86_64 arm64-v8a; do
     mkdir -p "$w/lib/$abi"; cp "$B/out/$abi/libmain.so" "$B/sdl-$abi/libSDL2.so" "$w/lib/$abi/"
