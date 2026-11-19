@@ -30,6 +30,9 @@ volatile uint8_t plat_keys[256];
 
 static const char *game_dir, *save_dir;
 static SDL_Window *window;
+static int direct_mode;   /* NFS4_DIRECT: GLES rysuje prosto w oknie (bez odczytu klatki i renderera SDL) */
+int plat_direct(void) { return direct_mode; }
+SDL_Window *plat_gl_window(void) { return direct_mode ? window : NULL; }
 static SDL_Renderer *renderer;
 static SDL_Texture *texture;
 static int width, height, running = 1;
@@ -239,7 +242,36 @@ static const uint8_t key_codes[SDL_NUM_SCANCODES] = {
     [SDL_SCANCODE_PAGEDOWN]=0xD1, [SDL_SCANCODE_DELETE]=0xD3,
     [SDL_SCANCODE_AC_BACK]=0x01
 };
+/* Benchmark (NFS4_BENCH=1): sam przechodzi menu -> pojedynczy wyścig i jedzie z gazem, potem kończy.
+ * Czasy w ms od startu, mnożone przez NFS4_BENCH_SLOW (domyślnie 1) dla wolnych maszyn. */
+typedef struct { unsigned ms; char op; int a, b; } BenchStep;
+static const BenchStep bench_steps[] = {
+    {16000, 'R', 0, 0}, {16500, 'M', 80, 198}, {17000, 'D', 0, 0}, {17400, 'U', 0, 0},        /* Single Player Arcade */
+    {21000, 'R', 0, 0}, {21500, 'M', 325, 195}, {22000, 'D', 0, 0}, {22400, 'U', 0, 0},       /* Single Race */
+    {32000, 'R', 0, 0}, {32500, 'M', 337, 464}, {33000, 'K', 0x1c, 1}, {33300, 'K', 0x1c, 0}, /* RACE (Enter) */
+    {60000, 'K', 0xc8, 1},                                                                    /* gaz */
+    {120000, 'Q', 0, 0},
+};
+static void bench_tick(void) {
+    static uint64_t t0; static unsigned next; static float slow;
+    if (!t0) { t0 = plat_ticks_us(); const char *e = getenv("NFS4_BENCH_SLOW"); slow = e ? (float)atof(e) : 1; }
+    const unsigned now_ms = (unsigned)((plat_ticks_us() - t0) / 1000);
+    while (next < sizeof bench_steps / sizeof *bench_steps && now_ms >= (unsigned)(bench_steps[next].ms * slow)) {
+        const BenchStep *b = &bench_steps[next++];
+        plat_log("BENCH t=%ums step %c %d %d", now_ms, b->op, b->a, b->b);
+        switch (b->op) {
+        case 'R': plat_mouse_dx -= 3000; plat_mouse_dy -= 3000; break;   /* kursor w lewy górny róg (przycina się do 0,0) */
+        case 'M': plat_mouse_dx += b->a; plat_mouse_dy += b->b; break;
+        case 'D': linux_input_mouse(1); break;
+        case 'U': linux_input_mouse(0); break;
+        case 'K': linux_input_key((uint8_t)b->a, b->b); break;
+        case 'Q': plat_log("BENCH done"); running = 0; break;
+        }
+    }
+}
+void plat_toggle_fps(void);
 int plat_pump(void) {
+    if (getenv("NFS4_BENCH")) bench_tick();
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
@@ -251,6 +283,7 @@ int plat_pump(void) {
             const unsigned scan = event.key.keysym.scancode;
             const int down = event.type == SDL_KEYDOWN;
             const uint8_t code = scan < SDL_NUM_SCANCODES ? key_codes[scan] : 0;
+            if (scan == SDL_SCANCODE_F3 && down && !event.key.repeat) plat_toggle_fps();
             if (code && !event.key.repeat) {
                 linux_input_key(code, down);
             }
@@ -297,6 +330,49 @@ void plat_present(const uint32_t *rgba, int w, int h) {
     frame_pending = 1;
     SDL_UnlockMutex(frame_lock);
 }
+/* Licznik klatek: NFS4_SHOW_FPS=1 przy starcie, F3 lub L3+R3 na padzie w trakcie gry. Pokazuje FPS i średni czas klatki. */
+static int show_fps = -1;
+static float fps_value, fps_ms;
+void plat_toggle_fps(void) { show_fps = show_fps > 0 ? 0 : 1; }
+/* Prostokąty licznika (tło shade 0, litery shade 1) w pikselach okna; rysuje je wywołanie zwrotne (renderer SDL albo GL). */
+void plat_fps_overlay(int w, int h, int screen_h, void (*rect)(int x, int y, int rw, int rh, int shade)) {
+    static const char CHARS[] = "0123456789.FPSMX";
+    static const char *const FONT[][5] = {
+        {"###","# #","# #","# #","###"}, {" # ","## "," # "," # ","###"}, {"###","  #","###","#  ","###"}, {"###","  #","###","  #","###"},
+        {"# #","# #","###","  #","  #"}, {"###","#  ","###","  #","###"}, {"###","#  ","###","# #","###"}, {"###","  #","  #","  #","  #"},
+        {"###","# #","###","# #","###"}, {"###","# #","###","  #","###"}, {"   ","   ","   ","   "," # "}, {"###","#  ","###","#  ","#  "},
+        {"###","# #","###","#  ","#  "}, {"###","#  ","###","  #","###"}, {"# #","###","###","# #","# #"}, {"# #","# #"," # ","# #","# #"}};
+    static uint64_t t0; static int frames;
+    if (show_fps < 0) show_fps = getenv("NFS4_SHOW_FPS") != NULL;
+    const uint64_t now = plat_ticks_us();
+    if (!t0) t0 = now;
+    frames++;
+    if (now - t0 >= 500000) { fps_value = frames * 1e6f / (now - t0); fps_ms = 1000.0f / fps_value; frames = 0; t0 = now; }
+    if (!show_fps || fps_value <= 0) return;
+    char text[48];
+    snprintf(text, sizeof text, "%.0f FPS %.1f MS %dX%d", fps_value, fps_ms, w, h);
+    const int px = screen_h >= 600 ? 3 : 2, len = (int)strlen(text);
+    const int bx = px * 2, by = px * 2;
+    rect(bx, by, len * 4 * px + px * 2, 7 * px + px * 2, 0);
+    for (int i = 0; i < len; ++i) {
+        const char *at = strchr(CHARS, text[i]);
+        if (!at || !*at) continue;
+        const char *const *g = FONT[at - CHARS];
+        for (int y = 0; y < 5; ++y) for (int x = 0; x < 3; ++x) if (g[y][x] == '#')
+            rect(bx + px + (i * 4 + x) * px, by + px + y * px, px, px, 1);
+    }
+}
+static SDL_Renderer *fps_renderer;
+static void fps_rect(int x, int y, int rw, int rh, int shade) {
+    SDL_Rect d = {x, y, rw, rh};
+    if (shade) SDL_SetRenderDrawColor(fps_renderer, 255, 255, 255, 255); else SDL_SetRenderDrawColor(fps_renderer, 0, 0, 0, 170);
+    SDL_RenderFillRect(fps_renderer, &d);
+}
+static void fps_draw(SDL_Renderer *r, int w, int h) {
+    fps_renderer = r;
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    plat_fps_overlay(w, h, h, fps_rect);
+}
 static void show_frame(const uint32_t *rgba, int w, int h) {
     if (!texture || w != width || h != height) {
         SDL_DestroyTexture(texture);
@@ -311,14 +387,16 @@ static void show_frame(const uint32_t *rgba, int w, int h) {
             SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
         }
     }
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);   /* pasy poza obrazem: czarne (kolor po nakładce byłby biały) */
     if (SDL_UpdateTexture(texture, NULL, rgba, w * 4) < 0 ||
         SDL_RenderClear(renderer) < 0 ||
         SDL_RenderCopy(renderer, texture, NULL, NULL) < 0)
         plat_fatal("SDL klatka: %s", SDL_GetError());
-    touch_draw(renderer, hle_glide_in_menu());
+    fps_draw(renderer, w, h);
     SDL_RenderPresent(renderer);
 }
 static void show_pending_frame(void) {
+    if (!renderer) return;
     SDL_LockMutex(frame_lock);
     if (frame_pending) {
         show_frame(frame, frame_width, frame_height);
@@ -334,12 +412,23 @@ static void mix(void *ctx, Uint8 *buffer, int size) {
 static void init_sdl(void) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0)
         plat_fatal("SDL: %s", SDL_GetError());
+    if (direct_mode) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+    }
+    int win_w = 640, win_h = 480;
+    if (getenv("NFS4_WINDOW")) sscanf(getenv("NFS4_WINDOW"), "%dx%d", &win_w, &win_h);   /* test: rozmiar okna */
+    if (win_w < 160 || win_h < 120 || win_w > 8192 || win_h > 8192) { win_w = 640; win_h = 480; }
     window = SDL_CreateWindow("NFS 4 - Linux", SDL_WINDOWPOS_CENTERED,
-                             SDL_WINDOWPOS_CENTERED, 640, 480,
-                             fullscreen_wanted() ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                             SDL_WINDOWPOS_CENTERED, win_w, win_h,
+                             (fullscreen_wanted() ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) | (direct_mode ? SDL_WINDOW_OPENGL : 0));
     if (!window) plat_fatal("SDL okno: %s", SDL_GetError());
-    renderer = SDL_CreateRenderer(window, -1, 0);
-    if (!renderer) plat_fatal("SDL renderer: %s", SDL_GetError());
+    if (!direct_mode) {
+        renderer = SDL_CreateRenderer(window, -1, 0);
+        if (!renderer) plat_fatal("SDL renderer: %s", SDL_GetError());
+    }
     frame_lock = SDL_CreateMutex();
     if (!frame_lock) plat_fatal("SDL mutex klatki: %s", SDL_GetError());
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");   /* dotyk obsługuje input_touch.c */
@@ -368,8 +457,8 @@ static void cleanup_sdl(void) {
     if (audio) SDL_CloseAudioDevice(audio);
     linux_input_cleanup();
     gpu_gles_cleanup();
-    SDL_DestroyTexture(texture);
-    SDL_DestroyRenderer(renderer);
+    if (texture) SDL_DestroyTexture(texture);
+    if (renderer) SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_DestroyMutex(frame_lock);
     free(frame);
@@ -443,6 +532,18 @@ int main(int argc, char **argv) {
         return 0;
     }
 #ifdef __ANDROID__
+    {   /* <files>/env.txt: linie KEY=VALUE ustawiają zmienne środowiskowe (NFS4_FPS, NFS4_WIDE, NFS4_BENCH...) */
+        const char *base = SDL_AndroidGetExternalStoragePath();
+        char path[PATH_MAX], line[256];
+        snprintf(path, sizeof path, "%s/env.txt", base ? base : "");
+        FILE *f = fopen(path, "r");
+        while (f && fgets(line, sizeof line, f)) {
+            char *eq = strchr(line, '=');
+            line[strcspn(line, "\r\n")] = 0;
+            if (line[0] != '#' && eq) { *eq = 0; setenv(line, eq + 1, 1); plat_log("env %s=%s", line, eq + 1); }
+        }
+        if (f) fclose(f);
+    }
     /* Dane gry: /sdcard/Android/data/<pakiet>/files/{game,save}; bez uprawnień. */
     static char android_game[PATH_MAX], android_save[PATH_MAX];
     if (argc != 3) {
@@ -463,6 +564,10 @@ int main(int argc, char **argv) {
     }
     game_dir = argv[1];
     save_dir = argv[2];
+    {   /* prezentacja prosto z GLES: domyślnie na handheldzie, NFS4_DIRECT=0/1 wymusza */
+        const char *d = getenv("NFS4_DIRECT");
+        direct_mode = !getenv("NFS4_SOFTWARE") && (d ? atoi(d) != 0 : getenv("NFS4_HANDHELD") != NULL);
+    }
     init_sdl();
     gpu_gles_prepare();
     start_audio();

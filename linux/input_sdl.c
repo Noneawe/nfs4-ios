@@ -6,6 +6,7 @@
 #include <string.h>
 
 void hle_key_event(uint8_t code, int down);
+void plat_toggle_fps(void);   /* plat_linux.c: licznik klatek (NFS4_SHOW_FPS, F3, L3+R3) */
 static SDL_GameController *controller;
 static uint8_t keyboard[256], gamepad[256];
 static int deadzone = 8000, analog_steering;
@@ -83,7 +84,10 @@ int linux_input_poll(int menu) {
     if (controller) {
         SDL_GameControllerUpdate();
         float x = axis(SDL_CONTROLLER_AXIS_LEFTX), y = axis(SDL_CONTROLLER_AXIS_LEFTY);
-        plat_joy_x = x; plat_joy_y = y;
+        /* wyścig czyta joystick "Touch Wheel": oś Y ujemna = gaz, dodatnia = hamulec; tylko RT/LT, pionowy wychył gałki jest ignorowany */
+        const float gas = axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT), brake = axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+        plat_joy_x = x; plat_joy_y = menu ? y : brake - gas;
+        if (plat_joy_y < -1) plat_joy_y = -1; else if (plat_joy_y > 1) plat_joy_y = 1;
         next[0xcb] = button(SDL_CONTROLLER_BUTTON_DPAD_LEFT) || (x < 0 && (menu || !analog_steering));
         next[0xcd] = button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || (x > 0 && (menu || !analog_steering));
         next[0xc8] = button(SDL_CONTROLLER_BUTTON_DPAD_UP) || (menu && y < 0);
@@ -98,31 +102,30 @@ int linux_input_poll(int menu) {
             mouse_x -= dx; mouse_y -= dy;
             pad_mouse = button(SDL_CONTROLLER_BUTTON_X);
         } else {
-            next[0xc8] |= button(SDL_CONTROLLER_BUTTON_A) || axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0;
-            next[0xd0] |= button(SDL_CONTROLLER_BUTTON_B) || axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 0;
-            next[0x39] = button(SDL_CONTROLLER_BUTTON_X);
+            /* układ jak w nowych grach wyścigowych: RT gaz, LT hamulec/wsteczny, lewa gałka kierownica,
+             * A hamulec ręczny, Y kamera, LB/RB biegi w dół/w górę, Start pauza */
+            next[0xc8] |= axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0;
+            next[0xd0] |= axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 0;
+            next[0x39] = button(SDL_CONTROLLER_BUTTON_A);
             next[0x2e] = button(SDL_CONTROLLER_BUTTON_Y);
             next[0x1e] = button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER);
             next[0x2c] = button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER);
             next[0x01] = button(SDL_CONTROLLER_BUTTON_START);
             next[0x0f] = button(SDL_CONTROLLER_BUTTON_BACK);
         }
+        /* przyciski joysticka 0..7: A (hamulec ręczny), Y (kamera), LB, RB, X, B, Start, Back */
         static const SDL_GameControllerButton buttons[8] = {
-            SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_X,
-            SDL_CONTROLLER_BUTTON_Y, SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
-            SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_BACK
+            SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_Y, SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
+            SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, SDL_CONTROLLER_BUTTON_X,
+            SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_BACK
         };
+        static int fps_chord;   /* L3 + R3 przełącza licznik klatek */
+        const int chord = button(SDL_CONTROLLER_BUTTON_LEFTSTICK) && button(SDL_CONTROLLER_BUTTON_RIGHTSTICK);
+        if (chord && !fps_chord) plat_toggle_fps();
+        fps_chord = chord;
         for (unsigned i = 0; i < 8; ++i) if (button(buttons[i])) plat_joy_buttons |= 1u << i;
     }
     touch_keys(next, menu);
-    {
-        float tx, ty; uint32_t tb;
-        touch_joy(&tx, &ty, &tb);
-        float jx = plat_joy_x + tx, jy = plat_joy_y + ty;
-        plat_joy_x = jx < -1 ? -1 : jx > 1 ? 1 : jx;
-        plat_joy_y = jy < -1 ? -1 : jy > 1 ? 1 : jy;
-        plat_joy_buttons |= tb;
-    }
     for (unsigned code = 0; code < 256; ++code) {
         gamepad[code] = next[code];
         update_key(code);
@@ -162,7 +165,23 @@ int linux_input_self_test(void) {
     ok &= plat_keys[0x1c] == 0;
     SDL_JoystickSetVirtualButton(joystick, 0, 1);
     SDL_JoystickUpdate(); linux_input_poll(0);
-    ok &= plat_keys[0xc8] == 0x80 && (plat_joy_buttons & 1);
+    ok &= plat_keys[0x39] == 0x80 && (plat_joy_buttons & 1);
+    SDL_JoystickSetVirtualAxis(joystick, 1, -20000);  /* lewa gałka do przodu w wyścigu: ani gaz, ani hamulec */
+    SDL_JoystickUpdate(); linux_input_poll(0);
+    ok &= plat_joy_y == 0 && plat_keys[0xc8] == 0 && plat_keys[0xd0] == 0;
+    SDL_JoystickSetVirtualAxis(joystick, 1, 20000);
+    SDL_JoystickUpdate(); linux_input_poll(0);
+    ok &= plat_joy_y == 0 && plat_keys[0xc8] == 0 && plat_keys[0xd0] == 0;
+    SDL_JoystickSetVirtualAxis(joystick, 1, 0);
+    SDL_JoystickSetVirtualAxis(joystick, 5, 20000);   /* RT = gaz: klawisz w górę i oś Y ujemna */
+    SDL_JoystickUpdate(); linux_input_poll(0);
+    ok &= plat_keys[0xc8] == 0x80 && plat_joy_y < 0;
+    SDL_JoystickSetVirtualAxis(joystick, 5, 0);
+    SDL_JoystickSetVirtualAxis(joystick, 4, 20000);   /* LT = hamulec: klawisz w dół i oś Y dodatnia */
+    SDL_JoystickUpdate(); linux_input_poll(0);
+    ok &= plat_keys[0xd0] == 0x80 && plat_joy_y > 0;
+    SDL_JoystickSetVirtualAxis(joystick, 4, 0);
+    SDL_JoystickUpdate(); linux_input_poll(0);
     SDL_JoystickSetVirtualButton(joystick, 4, 1);
     SDL_JoystickSetVirtualButton(joystick, 6, 1);
     SDL_JoystickUpdate();

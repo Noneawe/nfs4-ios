@@ -10,7 +10,7 @@ here=$(cd -- "$(dirname -- "$0")" && pwd)
 python3 "$here/patch-runtime.py" "$root"
 export CC="${CC:-gcc}"
 target=$("$CC" -dumpmachine)
-obj="$root/recomp/build/$target"
+obj="$root/recomp/build/$target${OBJ_SUFFIX:-}"
 mkdir -p -- "$obj" "$(dirname -- "$output")"
 src=("$root"/recomp/gen/*/*.c "$root"/recomp/runtime/*.c "$here/plat_linux.c" "$here/gpu_gles.c" "$here/input_sdl.c" "$here/input_touch.c")
 if [[ ! -f ${src[0]} ]]; then
@@ -33,7 +33,7 @@ compile() {
     "$CC" -std=gnu11 "$opt" -fno-strict-aliasing -fwrapv \
         -I"$root/recomp/runtime" -I"$root/recomp/gen/nfs4" \
         -I"$root/recomp/gen/v2a" -I"$root/recomp/gen/eacsnd" \
-        "${cflags[@]}" -pthread -c "$source" -o "$obj/${module}_${file}.o"
+        "${cflags[@]}" ${EXTRA_CFLAGS:-} -pthread -c "$source" -o "$obj/${module}_${file}.o"
 }
 export -f compile
 printf '%s\0' "${src[@]}" | xargs -0 -r -P "${JOBS:-4}" -n 1 bash -c 'compile "$1"' _

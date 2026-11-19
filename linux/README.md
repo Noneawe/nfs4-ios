@@ -53,9 +53,22 @@ Projekcja tekstur zachowuje znak `q` i odrzuca próbki za płaszczyzną projekto
 
 Na platformach EGL renderer tworzy kontekst z osobną powierzchnią pbuffer na wyświetlaczu SDL. Wątek gry nie zajmuje powierzchni okna prezentowanego przez SDL. To pozwala uniknąć drugiego okna na urządzeniach KMS/DRM. Na pulpicie bez bieżącego wyświetlacza EGL pozostaje zapasowa ścieżka z ukrytym oknem SDL. Test GLES wykonuje rysowanie na osobnym wątku.
 
-Pierwsza wersja backendu odczytuje gotowe klatki z GPU do SDL2. To może ograniczyć wydajność przy wysokich rozdzielczościach, szczególnie na R36S. Jeśli pomiary wykażą takie ograniczenie, kolejnym krokiem będzie prezentacja przez współdzielone tekstury bez odczytu do RAM.
+Pierwsza wersja backendu odczytuje gotowe klatki z GPU do SDL2. To może ograniczyć wydajność przy wysokich rozdzielczościach, szczególnie na R36S. Na handheldzie (`NFS4_HANDHELD`) jest to ominięte: `NFS4_DIRECT=1` rysuje prosto w oknie SDL/KMS i opóźnia zamianę buforów o klatkę, co na Mali-G31 daje ok. 30% krótszą klatkę w wyścigu. `NFS4_DIRECT=0/1` wymusza tryb; w trybie bezpośrednim `NFS4_WINDOW=WxH` ustawia rozmiar okna (testy).
 
 Poprzedni build zachowano w `work/nfs4host-software`, a jego log w `work/nfs4host-software.log`. Przebudowa przez `./setup.sh --build-only` zachowuje istniejące dane gry i zapisy.
+
+## Wydajność i benchmark
+
+Domyślnie gra jest ograniczona do 30 FPS (`NFS4_FPS=0` zdejmuje limit). Wygenerowany kod gry jest na x86-64 kompilowany z `-O0`
+i to on jest wąskim gardłem: na Intel UHD 630 wyścig 1360×768 daje 34 FPS (`-O0`) wobec 63 FPS z `GEN_OPT=-O1 ./setup.sh --build-only`
+(wyścig bez `NFS4_WIDE` idzie w 1600×1200 z konfiguracji gry, czyli 29 FPS vs 42 FPS). `-O2` na gcc zawiesza grę przy ładowaniu ekranu
+ustawień wyścigu, dlatego domyślne zostaje `-O0`; `-O1` przeszedł 2 minuty jazdy w benchmarku, ale nie pełny wyścig.
+
+`NFS4_BENCH=1` sam przechodzi menu do wyścigu i jedzie z gazem (w grze, bez wstrzykiwania zdarzeń z zewnątrz; `NFS4_BENCH_SLOW=n`
+mnoży czasy dla wolnych maszyn). Przykład na prawdziwym GPU bez okna: `SDL_VIDEODRIVER=offscreen NFS4_FPS=0 NFS4_BENCH=1 NFS4_WIDE=1.7778 work/nfs4host work/game work/save`.
+W logu `PROF` rozbija koszt klatki: wywołania GL, oczekiwanie na GPU, kopiowanie i prezentację. Odczyt klatki jest asynchroniczny (PBO,
+opóźnienie jednej klatki); `NFS4_SYNC_READBACK=1` wraca do synchronicznego, `NFS4_READBACK_AB=1` zmienia tryb co 600 klatek do porównań.
+Pomiary: PBO nie zmienia FPS na Intel UHD 630 (34→35 przy `-O0`, 63→63 przy `-O1`) ani w emulatorze Androida (6,8 vs 6,8 FPS).
 
 ## Widescreen (16:9)
 
@@ -108,3 +121,11 @@ Pad obsługiwany jest bez gptokeyb. Domyślnie emuluje klawiaturę; analogowe os
 są też dostępne jako `Touch Wheel` w ustawieniach gry. Martwą strefę ustawia
 `NFS4_DEADZONE` (domyślnie 8000), limit klatek `NFS4_FPS` (domyślnie 30).
 Mapowanie przycisków i tryb analogowego kierowania opisano w instrukcji PortMaster.
+
+Układ pada w wyścigu (jak w nowych grach wyścigowych): **RT** gaz, **LT** hamulec i wsteczny, **lewa gałka**
+kierownica (wychył w pionie nie daje gazu ani hamulca), **A** hamulec ręczny, **Y** kamera, **LB/RB** biegi w dół/w górę, **Start** pauza, **Back** Tab.
+Te same przyciski dostaje gra jako joystick `Touch Wheel` (oś X kierownica, oś Y gaz/hamulec, przyciski 0..7:
+A, Y, LB, RB, X, B, Start, Back); wiązania przycisków joysticka można zmienić w opcjach sterowania gry.
+W menu: gałka lub krzyżak nawiguje, A wybiera, B wraca, prawa gałka z X steruje kursorem.
+
+Licznik klatek (FPS i średni czas klatki w lewym górnym rogu): `NFS4_SHOW_FPS=1`, w grze F3 albo L3+R3 na padzie.

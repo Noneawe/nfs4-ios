@@ -47,10 +47,13 @@ obcięcie obrazu. Odczyt konfiguracji nie zmienia źródłowych plików PC.
 
 Możesz zmienić `NFS4_FPS` (0–120; 0 oznacza brak limitu) i `NFS4_DEADZONE`
 (0–30000; domyślnie 8000). Nie ma jeszcze pomiaru wydajności na R36S.
-Gotowe klatki są nadal odczytywane z GPU do SDL2; dalszą optymalizację należy
-oprzeć na pomiarze na konsoli.
+Na R36S (Mali-G31) obraz idzie prosto z GLES do okna SDL/KMS (`NFS4_DIRECT=1`, domyślnie
+w profilu), bez odczytu klatki do RAM. Zamiana buforów dla klatki N odbywa się na początku
+klatki N+1, więc GPU liczy równolegle z logiką gry (opóźnienie jednej klatki). W wyścigu daje to
+ok. 20 FPS zamiast ok. 15 FPS przy odczycie przez PBO (`NFS4_DIRECT=0`). Odczyt PBO jest nadal
+używany na pozostałych platformach.
 
-GLES używa osobnego kontekstu EGL z powierzchnią pbuffer. Okno SDL pozostaje
+W trybie `NFS4_DIRECT=0` GLES używa osobnego kontekstu EGL z powierzchnią pbuffer. Okno SDL pozostaje
 przeznaczone do prezentacji, bez jednoczesnego wiązania jego powierzchni przez
 wątek gry. Rzeczywista obsługa KMS/DRM i sterownika Mali wymaga testu na R36S.
 

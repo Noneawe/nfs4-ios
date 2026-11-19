@@ -68,6 +68,7 @@ if [[ ! -x $work/venv/bin/python ]]; then
     python3 -m venv "$work/venv"
 fi
 "$work/venv/bin/python" -m pip install --disable-pip-version-check pefile==2024.8.26 capstone==5.0.7
+python3 "$here/patch-runtime.py" "$temp/upstream" pool-only
 if ! "$work/venv/bin/python" -B "$temp/upstream/tools/recompile.py"; then
     cat "$temp/upstream"/logs/*-recompile.log >&2
     exit 1
