@@ -1,18 +1,33 @@
 {
-  "version": 2,
+  "version": 4,
   "name": "nfs4.zip",
-  "items": ["Need for Speed 4.sh", "nfs4"],
-  "items_opt": null,
+  "items": [
+    "Need for Speed 4.sh",
+    "nfs4"
+  ],
+  "items_opt": [],
   "attr": {
     "title": "Need for Speed 4: High Stakes",
-    "desc": "Experimental native ARM64 port for local R36S testing.",
-    "inst": "Copy your prepared PC game files into nfs4/game. Requires hardware validation.",
-    "genres": ["racing"],
-    "porter": ["Local build"],
-    "image": {},
+    "porter": [
+      "Noneawe"
+    ],
+    "desc": "Experimental native ARM64 port of Need for Speed 4: High Stakes, built from a static recompilation of the original game.",
+    "desc_md": null,
+    "inst": "Copy the prepared game files (lowercase names, NFS4 Modern Patch applied) from your own copy of the game to ports/nfs4/game/ before launching.",
+    "inst_md": null,
+    "genres": [
+      "racing"
+    ],
+    "image": null,
     "rtr": false,
-    "runtime": null,
+    "exp": false,
+    "runtime": [],
+    "store": [],
+    "availability": "paid",
     "reqs": [],
-    "arch": ["aarch64"]
+    "arch": [
+      "aarch64"
+    ],
+    "min_glibc": "2.29"
   }
 }
