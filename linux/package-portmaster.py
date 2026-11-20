@@ -32,6 +32,7 @@ def install_zip(binary, output):
         for name in ("profile.sh", "README.md", "port.json", "gameinfo.xml", "screenshot.png"):
             archive.write(ROOT / "portmaster" / name, "nfs4/" + name)
         archive.write(ROOT / "portmaster/UPSTREAM.txt", "nfs4/licenses/UPSTREAM.txt")
+        archive.write(ROOT / "portmaster/LICENSE-port.txt", "nfs4/licenses/LICENSE-port.txt")
         archive.writestr("nfs4/game/PUT_GAME_FILES_HERE.txt",
                          "Copy the contents of prepared work/game here. See ../README.md.\n")
     temporary.replace(output)

@@ -36,6 +36,7 @@ def main():
             assert not any(n.startswith("nfs4/save/") for n in names)
             assert {n for n in names if n.startswith("nfs4/game/")} == {"nfs4/game/PUT_GAME_FILES_HERE.txt"}
             assert (archive.getinfo("Need for Speed 4.sh").external_attr >> 16) & 0o111
+            assert "nfs4/licenses/LICENSE-port.txt" in names and "nfs4/licenses/UPSTREAM.txt" in names
             metadata = json.loads(archive.read("nfs4/port.json"))
             assert metadata["version"] == 4 and metadata["attr"]["arch"] == ["aarch64"]
             assert metadata["items"] == ["Need for Speed 4.sh", "nfs4"]

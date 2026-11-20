@@ -1,0 +1,23 @@
+Need for Speed 4: High Stakes, experimental ARM64 port (nfs4host.aarch64)
+
+Shipped in this package
+-----------------------
+nfs4host.aarch64   Native build of the Linux/ARM64 host and runtime. It is
+                   built from avoseed/nfs4-ios (see UPSTREAM.txt) plus the
+                   port sources in https://github.com/Noneawe/nfs4-ios
+                   (branch linux-arm64-port, folder linux/).
+
+Licence of the port sources
+---------------------------
+The port sources in linux/ have no licence file yet. No licence is granted
+until the author adds one to the repository.
+
+Not shipped
+-----------
+- Game data of Need for Speed 4: High Stakes (c) Electronic Arts. The player
+  copies the files from their own copy of the game. The package contains none.
+- NFS4 Modern Patch (community patch). It is not part of the package; the
+  player applies it to their own copy (see README.md).
+- SDL2 (zlib licence), libGLESv2, libEGL and glibc. They are linked
+  dynamically and come from the firmware. No library is bundled.
+- gptokeyb2 and portmsg. PortMaster provides them.
