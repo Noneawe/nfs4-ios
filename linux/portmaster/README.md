@@ -32,7 +32,9 @@ zgodności bibliotek. Zasady: [środowiska PortMaster](https://portmaster.games/
 1. Rozpakuj `work/nfs4-r36s-test.zip` do katalogu `ports` na karcie konsoli.
 2. Skopiuj **zawartość** przygotowanego na PC `work/game/` do `ports/nfs4/game/`.
    Ścieżka końcowa to `ports/nfs4/game/data/text/mam.dat`. Użyj przygotowanej
-   kopii z małymi literami i łatką VEG, nie surowego katalogu `DATA`.
+   kopii z małymi literami i nałożoną łatką „NFS4 Modern Patch” (v0.1.0,
+   https://veg.by/files/nfs4/nfs4_modern_patch.7z), nie surowego katalogu `DATA`.
+   `setup.sh` robi to automatycznie; samej łatki nie wgrywasz na konsolę.
 3. Uruchom `Need for Speed 4` w menu Ports.
 
 Paczka nie kopiuje zapisów z PC. Zapisy konsoli trafiają do `nfs4/save/`,

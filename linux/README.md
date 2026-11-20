@@ -17,7 +17,7 @@ Skopiuj katalog `DATA` z pecetowej gry do dowolnego katalogu. Skopiuj też `SAVE
 ./run.sh
 ```
 
-`setup.sh` pobiera sprawdzoną wersję łatki VEG i kod źródłowy z przypiętej rewizji. Weryfikuje SHA‑256, nakłada łatkę na kopię danych w `work/game/`, generuje C i buduje plik `work/nfs4host`. Pierwsza kompilacja może potrwać kilka minut. Jeśli masz już archiwum VEG, wskaż je jako drugi argument.
+`setup.sh` pobiera sprawdzoną wersję łatki „NFS4 Modern Patch” (v0.1.0, wydanej przez społeczność VEG, https://veg.by/files/nfs4/nfs4_modern_patch.7z) i kod źródłowy z przypiętej rewizji. Weryfikuje SHA‑256, nakłada łatkę na kopię danych w `work/game/`, generuje C i buduje plik `work/nfs4host`. Pierwsza kompilacja może potrwać kilka minut. Łatka poprawia grę pod nowsze systemy (to nie jest część tego projektu). Jeśli masz już archiwum `nfs4_modern_patch.7z`, wskaż je jako drugi argument.
 
 ```bash
 ./setup.sh "/ścieżka/do/NFS4" "/ścieżka/do/nfs4_modern_patch.7z"
